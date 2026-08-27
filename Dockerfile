@@ -1,7 +1,8 @@
-FROM python:3.12-slim
+FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    RPA_HEADLESS=true
 
 WORKDIR /app
 

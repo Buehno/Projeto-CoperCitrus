@@ -8,17 +8,19 @@ from copercitrus_price_collector.service import CollectionService
 class SuccessProvider:
     name = "Fonte OK"
 
-    def search(self, query, limit):
+    def search(self, product, limit):
         return [
             SearchResult(
                 provider=self.name,
                 rank=1,
-                title=query,
-                description=query,
+                title=product.query,
+                description=product.query,
                 price_min=10.0,
                 price_max=10.0,
                 currency="BRL",
                 purchase_url="https://example.com",
+                similarity_score=100.0,
+                match_type="COMPATIVEL",
             )
         ]
 
@@ -26,7 +28,7 @@ class SuccessProvider:
 class FailureProvider:
     name = "Fonte Erro"
 
-    def search(self, query, limit):
+    def search(self, product, limit):
         raise ProviderError("indisponivel")
 
 

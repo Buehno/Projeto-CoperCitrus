@@ -13,6 +13,7 @@ class ProductInput:
     marca: str | None = None
     modelo: str | None = None
     sku: str | None = None
+    quantidade_solicitada: str | None = None
 
     @property
     def query(self) -> str:
@@ -39,11 +40,19 @@ class SearchResult:
     price_max: float | None
     currency: str
     purchase_url: str
+    brand: str | None = None
+    package_quantity: str | None = None
+    similarity_score: float = 0.0
+    match_type: str = "DIVERGENTE"
     seller: str | None = None
     rating: float | None = None
     review_count: int | None = None
     sold_count: int | None = None
     image_url: str | None = None
+
+    @property
+    def possible_similar(self) -> bool:
+        return self.match_type == "SIMILAR"
 
 
 @dataclass(frozen=True, slots=True)

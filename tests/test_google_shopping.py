@@ -1,67 +1,46 @@
 import unittest
 
+from copercitrus_price_collector.browser import BrowserProductCard
+from copercitrus_price_collector.models import ProductInput
 from copercitrus_price_collector.providers.google_shopping import GoogleShoppingProvider
 
 
-class FakeHttp:
-    def __init__(self, payload):
-        self.payload = payload
-        self.params = None
+class FakeBrowser:
+    def __init__(self, cards):
+        self.cards = cards
+        self.calls = []
 
-    def get_json(self, url, params, headers=None):
-        self.params = params
-        return self.payload
-
-    def post_json(self, url, body, headers=None):
-        raise AssertionError("not expected")
+    def collect_cards(self, provider_name, url, selectors, limit):
+        self.calls.append((provider_name, url, selectors, limit))
+        return self.cards[:limit]
 
 
 class GoogleShoppingProviderTest(unittest.TestCase):
-    def test_maps_and_deduplicates_results(self):
-        http = FakeHttp(
-            {
-                "inline_shopping_results": [
-                    {
-                        "title": "Notebook X",
-                        "extracted_price": 3999.9,
-                        "link": "https://loja.example/x",
-                        "source": "Loja A",
-                        "snippet": "16 GB RAM",
-                        "rating": 4.8,
-                        "reviews": 42,
-                        "product_id": "x",
-                    }
-                ],
-                "categorized_shopping_results": [
-                    {
-                        "shopping_results": [
-                            {
-                                "title": "Notebook X repetido",
-                                "price": "R$ 3.999,90",
-                                "product_link": "https://google.example/x",
-                                "product_id": "x",
-                            },
-                            {
-                                "title": "Notebook Y",
-                                "price": "R$ 4.250,00",
-                                "product_link": "https://google.example/y",
-                                "source": "Loja B",
-                            },
-                        ]
-                    }
-                ],
-            }
+    def test_builds_browser_search_and_maps_visible_cards(self):
+        browser = FakeBrowser(
+            [
+                BrowserProductCard(
+                    title="Mouse sem fio Logitech M170 kit 2 unidades",
+                    price_text="R$ 79,90",
+                    purchase_url="https://loja.example/m170",
+                    seller="Loja A",
+                    raw_text="Mouse Logitech M170 - kit com 2 unidades",
+                )
+            ]
         )
-        provider = GoogleShoppingProvider("secret", http)
+        provider = GoogleShoppingProvider(browser)
+        product = ProductInput(2, "Mouse sem fio", "Logitech", "M170", "SKU-1", "10")
 
-        results = provider.search("notebook", 5)
+        results = provider.search(product, 5)
 
-        self.assertEqual(2, len(results))
-        self.assertEqual(3999.9, results[0].price_min)
-        self.assertEqual("16 GB RAM", results[0].description)
-        self.assertEqual(4250.0, results[1].price_min)
-        self.assertEqual("br", http.params["gl"])
-        self.assertEqual("secret", http.params["api_key"])
+        self.assertEqual(1, len(results))
+        self.assertEqual(79.9, results[0].price_min)
+        self.assertEqual("Logitech", results[0].brand)
+        self.assertEqual("2 un", results[0].package_quantity)
+        self.assertEqual("COMPATIVEL", results[0].match_type)
+        self.assertIn("tbm=shop", browser.calls[0][1])
+        self.assertIn("Mouse+sem+fio+Logitech+M170+SKU-1", browser.calls[0][1])
+        self.assertNotIn("api", browser.calls[0][1].casefold())
 
 
 if __name__ == "__main__":

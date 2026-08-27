@@ -1,56 +1,57 @@
-# Projeto CoperCitrus — Coletor de preços
+# Projeto CoperCitrus — RPA de pesquisa de preços
 
-Serviço Python que lê uma lista de produtos em Excel, consulta Google Shopping e Shopee e gera outro Excel com preços, descrição comercial, loja e link de compra.
+Aplicacao Python que le uma lista de produtos em Excel, abre um Chromium controlado pelo Playwright e pesquisa diretamente nas paginas publicas do Google Shopping e da Shopee.
 
-## Decisão de integração
+Nao utiliza SerpAPI, API de Afiliados da Shopee nem qualquer outra API de resultados.
 
-O projeto não automatiza páginas nem tenta contornar CAPTCHA. A busca do Google usa a [Google Shopping API da SerpAPI](https://serpapi.com/google-shopping-api), porque as rotas de pesquisa/Shopping do Google não permitem coleta automatizada em `robots.txt`. A Shopee usa a API GraphQL oficial do [Programa de Afiliados Shopee](https://affiliate.shopee.com.br/open_api).
+## O que o RPA entrega
 
-Isso reduz quebras por mudanças de HTML, risco de bloqueio e exposição jurídica. As credenciais são lidas apenas de variáveis de ambiente.
+O Excel de saida possui tres abas:
 
-## Entrada
+- `Resultados`: todos os anuncios encontrados, com preco, marca, nome, quantidade/embalagem, loja, link e classificacao;
+- `Produtos similares`: alternativas com similaridade intermediaria em relacao ao produto solicitado;
+- `Resumo`: total de ofertas, produtos compativeis, similares e menor preco por item.
 
-Arquivo `.xlsx` com uma coluna obrigatória:
+### Campos principais
 
-| Coluna | Obrigatória | Uso |
+| Campo | Origem |
+|---|---|
+| Produto solicitado | Planilha de entrada |
+| Quantidade solicitada | Planilha de entrada |
+| Nome encontrado | Card visivel no marketplace |
+| Marca encontrada | Validada no titulo do anuncio |
+| Quantidade/embalagem | Extraida de textos como `10 un`, `500 ml` ou `2 kg` |
+| Preco | Card visivel no marketplace |
+| Similaridade | Comparacao entre produto, marca, modelo e anuncio |
+| Link de compra | Link presente no card |
+
+`Quantidade solicitada` representa quanto a CoperCitrus pretende comprar. `Quantidade/embalagem encontrada` representa o volume identificado no anuncio. O RPA nao inventa estoque quando o site nao exibe essa informacao.
+
+## Planilha de entrada
+
+| Coluna | Obrigatoria | Uso |
 |---|---:|---|
-| `Produto` | Sim | Nome principal usado na pesquisa |
-| `Marca` | Não | Refina a consulta |
-| `Modelo` | Não | Refina a consulta |
-| `SKU` | Não | Refina a consulta e mantém rastreabilidade |
+| `Produto` | Sim | Nome principal da pesquisa |
+| `Marca` | Nao | Refina a busca e a validacao |
+| `Modelo` | Nao | Refina a busca e a validacao |
+| `SKU` | Nao | Mantem rastreabilidade |
+| `Quantidade` | Nao | Quantidade solicitada para compra |
 
-Os cabeçalhos não diferenciam maiúsculas, minúsculas ou acentos. Também são aceitos `Nome`, `Item`, `Código` e `Código do produto`.
+Tambem sao reconhecidos cabecalhos como `Nome`, `Item`, `Codigo`, `Qtd` e `Qtde`.
 
-## Saída
+## Instalacao no Windows 11 / Git Bash
 
-O Excel gerado contém:
-
-- aba `Resultados`: uma linha por oferta, com fonte, preço mínimo/máximo, descrição, loja, avaliação, link, imagem, data e status;
-- aba `Resumo`: quantidade de ofertas e menor preço encontrado por produto;
-- erros e ausência de resultados registrados por produto e por fonte, sem interromper o restante do lote.
-
-> A “descrição” é o título/snippet comercial disponibilizado pelo provedor. O sistema não abre a página do anúncio para copiar a descrição integral.
-
-## Configuração
-
-Requisitos: Python 3.12+ e uma conta em cada provedor que será usado.
+Requisitos: Python 3.12+ e Git Bash.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows Git Bash: source .venv/Scripts/activate
+source .venv/Scripts/activate
 python -m pip install -e .
+python -m playwright install chromium
 cp .env.example .env
 ```
 
-Exporte as credenciais no terminal. O arquivo `.env` está ignorado pelo Git, mas o aplicativo não o carrega automaticamente para evitar leitura acidental de segredos.
-
-```bash
-export SERPAPI_KEY="sua-chave"
-export SHOPEE_APP_ID="seu-app-id"
-export SHOPEE_APP_SECRET="seu-app-secret"
-```
-
-Para obter as credenciais da Shopee, a empresa precisa estar aprovada no Programa de Afiliados e habilitar a Open API. Para executar somente uma fonte, configure apenas a credencial correspondente e informe `--providers`.
+O arquivo `.env` serve como referencia. As configuracoes podem ser exportadas no terminal; nenhuma credencial e necessaria.
 
 ## Uso
 
@@ -60,52 +61,68 @@ Crie uma planilha-modelo:
 copercitrus-price template produtos.xlsx
 ```
 
-Consulte as duas fontes:
+Primeiro teste com o navegador visivel:
+
+```bash
+copercitrus-price collect produtos.xlsx --headed --limit 5
+```
+
+Depois execute em segundo plano:
 
 ```bash
 copercitrus-price collect produtos.xlsx --output resultados/precos.xlsx
 ```
 
-Somente Google ou somente Shopee:
+Somente uma fonte:
 
 ```bash
-copercitrus-price collect produtos.xlsx --providers google --limit 3
-copercitrus-price collect produtos.xlsx --providers shopee --limit 10
+copercitrus-price collect produtos.xlsx --providers google
+copercitrus-price collect produtos.xlsx --providers shopee
 ```
 
-Opções úteis:
+Para usar o Chrome ou Edge instalado:
 
-```text
---sheet NOME           aba de entrada; por padrão usa a aba ativa
---limit N              resultados por produto e fonte (1 a 20)
---max-products N       limite de linhas de entrada (padrão: 1000)
---delay SEGUNDOS       espera entre chamadas (padrão: 1,0)
+```bash
+copercitrus-price collect produtos.xlsx --headed --browser-channel chrome
+copercitrus-price collect produtos.xlsx --headed --browser-channel msedge
 ```
+
+## Classificacao dos resultados
+
+- `COMPATIVEL`: similaridade de 80% ou mais;
+- `SIMILAR`: similaridade entre 50% e 79,9%;
+- `DIVERGENTE`: similaridade abaixo de 50%.
+
+A marca e o modelo informado na entrada aumentam a precisao. A aba `Produtos similares` contem somente os resultados classificados como `SIMILAR`.
+
+## Bloqueios e mudancas de pagina
+
+O RPA usa seletores alternativos porque o HTML dos marketplaces pode mudar. Caso detecte CAPTCHA, trafego incomum, verificacao humana ou acesso negado, a fonte e registrada como erro e o lote continua.
+
+O projeto nao tenta:
+
+- resolver ou contornar CAPTCHA;
+- usar modo stealth, proxies rotativos ou falsificacao de identidade;
+- acessar paginas autenticadas;
+- extrair dados que nao estejam visiveis ao usuario.
 
 ## Docker
 
 ```bash
-docker build -t copercitrus-price-collector .
-docker run --rm \
-  -e SERPAPI_KEY \
-  -e SHOPEE_APP_ID \
-  -e SHOPEE_APP_SECRET \
+docker build -t copercitrus-rpa .
+docker run --rm --ipc=host \
   -v "$PWD/dados:/dados" \
-  copercitrus-price-collector collect /dados/produtos.xlsx --output /dados/resultados.xlsx
+  copercitrus-rpa collect /dados/produtos.xlsx --output /dados/resultados.xlsx
 ```
 
 ## Testes
 
-Os testes usam respostas simuladas: não consomem créditos nem chamam Google ou Shopee.
+Os testes usam cards simulados e nao acessam Google ou Shopee.
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Operação e segurança
+## Uso responsavel
 
-- nunca versione `.env`, chaves, planilhas de clientes ou arquivos de resultado;
-- use uma identidade/segredo separado por ambiente e rotacione credenciais periodicamente;
-- mantenha `REQUEST_DELAY_SECONDS` maior que zero e respeite os limites contratuais dos provedores;
-- preços e disponibilidade mudam: considere sempre `Coletado em UTC` antes de tomar uma decisão de compra;
-- valide termos, limites e custos dos provedores antes de colocar a rotina em produção.
+Automacao de sites deve ser executada somente quando houver autorizacao e de acordo com os termos e instrucoes automatizadas de cada pagina. Os termos atuais do Google restringem acesso automatizado que contrarie instrucoes legiveis por maquina. Antes de colocar o lote em producao, valide a permissao de uso com o responsavel juridico/contratual e mantenha intervalos conservadores entre pesquisas.

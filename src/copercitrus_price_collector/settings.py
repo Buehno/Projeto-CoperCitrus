@@ -1,4 +1,4 @@
-"""Environment-based application settings."""
+"""Configuracoes do Chromium e dos limites operacionais do RPA."""
 
 from __future__ import annotations
 
@@ -28,35 +28,43 @@ def _int_env(name: str, default: int) -> int:
         raise ConfigurationError(f"{name} deve ser inteiro") from exc
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "sim"}:
+        return True
+    if normalized in {"0", "false", "no", "nao", "não"}:
+        return False
+    raise ConfigurationError(f"{name} deve ser true ou false")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
-    serpapi_key: str | None
-    shopee_app_id: str | None
-    shopee_app_secret: str | None
-    google_location: str
-    timeout_seconds: float
-    max_retries: int
+    headless: bool
+    browser_channel: str | None
+    browser_timeout_seconds: float
+    slow_mo_ms: int
     request_delay_seconds: float
     result_limit: int
 
     @classmethod
     def from_env(cls) -> Settings:
         settings = cls(
-            serpapi_key=os.getenv("SERPAPI_KEY") or None,
-            shopee_app_id=os.getenv("SHOPEE_APP_ID") or None,
-            shopee_app_secret=os.getenv("SHOPEE_APP_SECRET") or None,
-            google_location=os.getenv(
-                "GOOGLE_LOCATION", "Sao Paulo, State of Sao Paulo, Brazil"
-            ),
-            timeout_seconds=_float_env("HTTP_TIMEOUT_SECONDS", 30.0),
-            max_retries=_int_env("HTTP_MAX_RETRIES", 3),
-            request_delay_seconds=_float_env("REQUEST_DELAY_SECONDS", 1.0),
+            headless=_bool_env("RPA_HEADLESS", True),
+            browser_channel=os.getenv("RPA_BROWSER_CHANNEL") or None,
+            browser_timeout_seconds=_float_env("RPA_BROWSER_TIMEOUT_SECONDS", 45.0),
+            slow_mo_ms=_int_env("RPA_SLOW_MO_MS", 0),
+            request_delay_seconds=_float_env("REQUEST_DELAY_SECONDS", 2.0),
             result_limit=_int_env("RESULT_LIMIT", 5),
         )
-        if settings.timeout_seconds <= 0:
-            raise ConfigurationError("HTTP_TIMEOUT_SECONDS deve ser maior que zero")
-        if settings.max_retries < 0:
-            raise ConfigurationError("HTTP_MAX_RETRIES nao pode ser negativo")
+        if settings.browser_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "RPA_BROWSER_TIMEOUT_SECONDS deve ser maior que zero"
+            )
+        if settings.slow_mo_ms < 0:
+            raise ConfigurationError("RPA_SLOW_MO_MS nao pode ser negativo")
         if settings.request_delay_seconds < 0:
             raise ConfigurationError("REQUEST_DELAY_SECONDS nao pode ser negativo")
         if not 1 <= settings.result_limit <= 20:

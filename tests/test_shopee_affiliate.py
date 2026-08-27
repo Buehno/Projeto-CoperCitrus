@@ -1,59 +1,43 @@
-import hashlib
-import json
 import unittest
 
-from copercitrus_price_collector.providers.shopee_affiliate import ShopeeAffiliateProvider
+from copercitrus_price_collector.browser import BrowserProductCard
+from copercitrus_price_collector.models import ProductInput
+from copercitrus_price_collector.providers.shopee_affiliate import ShopeeProvider
 
 
-class FakeHttp:
-    def __init__(self):
-        self.body = None
-        self.headers = None
+class FakeBrowser:
+    def __init__(self, cards):
+        self.cards = cards
+        self.url = None
 
-    def get_json(self, url, params, headers=None):
-        raise AssertionError("not expected")
-
-    def post_json(self, url, body, headers=None):
-        self.body = body
-        self.headers = headers
-        return {
-            "data": {
-                "productOfferV2": {
-                    "nodes": [
-                        {
-                            "productName": "Mouse sem fio",
-                            "priceMin": "89.90",
-                            "priceMax": "99.90",
-                            "productLink": "https://shopee.com.br/product/1/2",
-                            "shopName": "Loja Oficial",
-                            "ratingStar": "4.7",
-                            "sales": 123,
-                        }
-                    ]
-                }
-            }
-        }
+    def collect_cards(self, provider_name, url, selectors, limit):
+        self.url = url
+        return self.cards[:limit]
 
 
-class ShopeeAffiliateProviderTest(unittest.TestCase):
-    def test_signs_exact_payload_and_maps_product(self):
-        http = FakeHttp()
-        provider = ShopeeAffiliateProvider(
-            "123", "top-secret", http, clock=lambda: 1_700_000_000
+class ShopeeProviderTest(unittest.TestCase):
+    def test_uses_public_search_page_and_classifies_similar_product(self):
+        browser = FakeBrowser(
+            [
+                BrowserProductCard(
+                    title="Furadeira parafusadeira Bosch GSB 12V",
+                    price_text="R$ 499,00",
+                    purchase_url="https://shopee.com.br/product/1/2",
+                    seller="Loja Oficial",
+                )
+            ]
+        )
+        provider = ShopeeProvider(browser)
+
+        results = provider.search(
+            ProductInput(2, "Parafusadeira", "Bosch", "GSR 12V"), 3
         )
 
-        results = provider.search("mouse", 3)
-
-        expected_signature = hashlib.sha256(
-            f"1231700000000{http.body}top-secret".encode()
-        ).hexdigest()
-        self.assertIn(expected_signature, http.headers["Authorization"])
-        decoded = json.loads(http.body)
-        self.assertEqual("mouse", decoded["variables"]["keyword"])
-        self.assertEqual(3, decoded["variables"]["limit"])
-        self.assertEqual(89.9, results[0].price_min)
-        self.assertEqual(99.9, results[0].price_max)
-        self.assertEqual(123, results[0].sold_count)
+        self.assertEqual(499.0, results[0].price_min)
+        self.assertEqual("Bosch", results[0].brand)
+        self.assertEqual("SIMILAR", results[0].match_type)
+        self.assertTrue(results[0].possible_similar)
+        self.assertIn("shopee.com.br/search?keyword=", browser.url)
 
 
 if __name__ == "__main__":

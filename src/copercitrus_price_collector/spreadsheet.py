@@ -1,4 +1,4 @@
-"""Excel input and output helpers."""
+"""Leitura da lista de produtos e geracao do relatorio Excel do RPA."""
 
 from __future__ import annotations
 
@@ -22,26 +22,28 @@ HEADER_ALIASES = {
     "marca": {"marca"},
     "modelo": {"modelo"},
     "sku": {"sku", "codigo", "codigoproduto", "codigodoproduto", "coditem"},
+    "quantidade": {"quantidade", "qtd", "qtde", "quantidadesolicitada"},
 }
 
 RESULT_HEADERS = [
     "Linha origem",
     "Produto solicitado",
-    "Marca",
+    "Marca solicitada",
     "Modelo",
     "SKU",
+    "Quantidade solicitada",
     "Consulta",
     "Fonte",
     "Posicao",
-    "Titulo",
-    "Descricao",
-    "Preco minimo",
+    "Nome produto encontrado",
+    "Marca encontrada",
+    "Quantidade/embalagem encontrada",
+    "Preco",
     "Preco maximo",
-    "Moeda",
+    "Classificacao",
+    "Similaridade (%)",
+    "Possivel produto parecido",
     "Loja",
-    "Avaliacao",
-    "Quantidade avaliacoes",
-    "Quantidade vendida",
     "Link de compra",
     "Imagem",
     "Coletado em UTC",
@@ -49,9 +51,24 @@ RESULT_HEADERS = [
     "Erro",
 ]
 
+SIMILAR_HEADERS = [
+    "Produto solicitado",
+    "Quantidade solicitada",
+    "Fonte",
+    "Nome produto parecido",
+    "Marca encontrada",
+    "Quantidade/embalagem",
+    "Preco",
+    "Similaridade (%)",
+    "Loja",
+    "Link de compra",
+]
+
 HEADER_FILL = PatternFill("solid", fgColor="183B56")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ERROR_FILL = PatternFill("solid", fgColor="FCE8E6")
+SIMILAR_FILL = PatternFill("solid", fgColor="FFF2CC")
+DIVERGENT_FILL = PatternFill("solid", fgColor="E7E6E6")
 
 
 def _normalize_header(value: object) -> str:
@@ -114,11 +131,14 @@ def read_products(
             marca = _value_at(values, indexes.get("marca"))
             modelo = _value_at(values, indexes.get("modelo"))
             sku = _value_at(values, indexes.get("sku"))
-            if not any((produto, marca, modelo, sku)):
+            quantidade = _value_at(values, indexes.get("quantidade"))
+            if not any((produto, marca, modelo, sku, quantidade)):
                 continue
             if not produto:
                 raise SpreadsheetError(f"Linha {row_number}: Produto esta vazio")
-            products.append(ProductInput(row_number, produto, marca, modelo, sku))
+            products.append(
+                ProductInput(row_number, produto, marca, modelo, sku, quantidade)
+            )
             if len(products) > max_products:
                 raise SpreadsheetError(
                     f"A planilha excede o limite de {max_products} produtos"
@@ -142,23 +162,21 @@ def create_template(path: str | Path) -> Path:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Produtos"
-    headers = ["Produto", "Marca", "Modelo", "SKU"]
+    headers = ["Produto", "Marca", "Modelo", "SKU", "Quantidade"]
     sheet.append(headers)
-    for cell in sheet[1]:
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center")
+    _style_header(sheet)
     notes = {
-        "A1": "Obrigatorio. Nome do produto que sera pesquisado.",
-        "B1": "Opcional. Ajuda a refinar a busca.",
-        "C1": "Opcional. Ajuda a refinar a busca.",
+        "A1": "Obrigatorio. Nome do produto pesquisado pelo RPA.",
+        "B1": "Opcional. Melhora a busca e a validacao de similaridade.",
+        "C1": "Opcional. Modelo ou especificacao principal.",
         "D1": "Opcional. Codigo interno ou do fabricante.",
+        "E1": "Opcional. Quantidade que deve ser comprada; nao e estoque do anuncio.",
     }
     for coordinate, text in notes.items():
-        sheet[coordinate].comment = Comment(text, "IAgentics")
+        sheet[coordinate].comment = Comment(text, "Ronaldo Bueno")
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = "A1:D1"
-    for index, width in enumerate([42, 22, 24, 22], start=1):
+    sheet.auto_filter.ref = "A1:E1"
+    for index, width in enumerate([42, 22, 24, 22, 18], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     workbook.save(destination)
     workbook.close()
@@ -182,18 +200,19 @@ def export_results(rows: list[CollectionRow], path: str | Path) -> Path:
                 row.product.marca,
                 row.product.modelo,
                 row.product.sku,
+                row.product.quantidade_solicitada,
                 row.product.query,
                 row.provider,
                 item.rank if item else None,
                 item.title if item else None,
-                item.description if item else None,
+                item.brand if item else None,
+                item.package_quantity if item else None,
                 item.price_min if item else None,
                 item.price_max if item else None,
-                item.currency if item else "BRL",
+                item.match_type if item else None,
+                item.similarity_score / 100 if item else None,
+                "Sim" if item and item.possible_similar else "Nao",
                 item.seller if item else None,
-                item.rating if item else None,
-                item.review_count if item else None,
-                item.sold_count if item else None,
                 item.purchase_url if item else None,
                 item.image_url if item else None,
                 row.collected_at.replace(microsecond=0).isoformat(),
@@ -203,48 +222,102 @@ def export_results(rows: list[CollectionRow], path: str | Path) -> Path:
         )
 
     _format_results_sheet(results_sheet)
+    _build_similar_sheet(workbook, rows)
     _build_summary_sheet(workbook, rows)
     workbook.save(destination)
     workbook.close()
     return destination
 
 
-def _format_results_sheet(sheet) -> None:
+def _style_header(sheet) -> None:
     for cell in sheet[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+
+def _add_table(sheet, name: str) -> None:
+    if sheet.max_row < 2:
+        return
+    table = Table(displayName=name, ref=sheet.dimensions)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    sheet.add_table(table)
+
+
+def _format_results_sheet(sheet) -> None:
+    _style_header(sheet)
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    sheet.row_dimensions[1].height = 32
+    sheet.row_dimensions[1].height = 36
     widths = [
-        12, 28, 18, 20, 18, 36, 18, 10, 42, 42, 16, 16, 10, 22, 12, 18, 18,
-        48, 44, 24, 18, 44,
+        12, 30, 20, 20, 18, 20, 38, 18, 10, 44, 20, 24, 16, 16, 18, 18,
+        22, 22, 50, 44, 24, 18, 48,
     ]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row_index in range(2, sheet.max_row + 1):
-        sheet.cell(row_index, 11).number_format = 'R$ #,##0.00'
-        sheet.cell(row_index, 12).number_format = 'R$ #,##0.00'
-        sheet.cell(row_index, 15).number_format = "0.0"
-        for column in (18, 19):
+        sheet.cell(row_index, 13).number_format = 'R$ #,##0.00'
+        sheet.cell(row_index, 14).number_format = 'R$ #,##0.00'
+        sheet.cell(row_index, 16).number_format = "0.0%"
+        for column in (19, 20):
             cell = sheet.cell(row_index, column)
             if cell.value:
                 cell.hyperlink = str(cell.value)
                 cell.style = "Hyperlink"
-        if sheet.cell(row_index, 21).value == "ERRO":
+        match_type = sheet.cell(row_index, 15).value
+        if match_type == "SIMILAR":
+            for cell in sheet[row_index]:
+                cell.fill = SIMILAR_FILL
+        elif match_type == "DIVERGENTE":
+            for cell in sheet[row_index]:
+                cell.fill = DIVERGENT_FILL
+        if sheet.cell(row_index, 22).value == "ERRO":
             for cell in sheet[row_index]:
                 cell.fill = ERROR_FILL
-    if sheet.max_row >= 2:
-        table = Table(displayName="ResultadosColeta", ref=sheet.dimensions)
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
+    _add_table(sheet, "ResultadosRpa")
+
+
+def _build_similar_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
+    sheet = workbook.create_sheet("Produtos similares")
+    sheet.append(SIMILAR_HEADERS)
+    for row in rows:
+        item = row.result
+        if item is None or not item.possible_similar:
+            continue
+        sheet.append(
+            [
+                row.product.produto,
+                row.product.quantidade_solicitada,
+                row.provider,
+                item.title,
+                item.brand,
+                item.package_quantity,
+                item.price_min,
+                item.similarity_score / 100,
+                item.seller,
+                item.purchase_url,
+            ]
         )
-        sheet.add_table(table)
+    _style_header(sheet)
+    sheet.freeze_panes = "A2"
+    for index, width in enumerate(
+        [30, 20, 18, 44, 20, 24, 16, 18, 22, 50], start=1
+    ):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row_index in range(2, sheet.max_row + 1):
+        sheet.cell(row_index, 7).number_format = 'R$ #,##0.00'
+        sheet.cell(row_index, 8).number_format = "0.0%"
+        link_cell = sheet.cell(row_index, 10)
+        if link_cell.value:
+            link_cell.hyperlink = str(link_cell.value)
+            link_cell.style = "Hyperlink"
+    _add_table(sheet, "ProdutosSimilares")
 
 
 def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
@@ -252,11 +325,14 @@ def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
     sheet.append(
         [
             "Produto",
+            "Marca solicitada",
             "SKU",
+            "Quantidade solicitada",
             "Ofertas encontradas",
+            "Compativeis",
+            "Similares",
             "Menor preco",
             "Fonte menor preco",
-            "Loja",
             "Link de compra",
         ]
     )
@@ -272,38 +348,40 @@ def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
         ]
         cheapest = min(successes, key=lambda row: row.result.price_min) if successes else None
         result = cheapest.result if cheapest else None
+        product = product_rows[0].product
         sheet.append(
             [
                 product_name,
+                product.marca,
                 sku,
+                product.quantidade_solicitada,
                 sum(1 for row in product_rows if row.status == "OK"),
+                sum(
+                    1
+                    for row in product_rows
+                    if row.result is not None and row.result.match_type == "COMPATIVEL"
+                ),
+                sum(
+                    1
+                    for row in product_rows
+                    if row.result is not None and row.result.possible_similar
+                ),
                 result.price_min if result else None,
                 cheapest.provider if cheapest else None,
-                result.seller if result else None,
                 result.purchase_url if result else None,
             ]
         )
 
-    for cell in sheet[1]:
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    _style_header(sheet)
     sheet.freeze_panes = "A2"
-    for index, width in enumerate([34, 18, 22, 18, 22, 22, 50], start=1):
+    for index, width in enumerate(
+        [34, 20, 18, 20, 20, 14, 14, 18, 22, 50], start=1
+    ):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row_index in range(2, sheet.max_row + 1):
-        sheet.cell(row_index, 4).number_format = 'R$ #,##0.00'
-        link_cell = sheet.cell(row_index, 7)
+        sheet.cell(row_index, 8).number_format = 'R$ #,##0.00'
+        link_cell = sheet.cell(row_index, 10)
         if link_cell.value:
             link_cell.hyperlink = str(link_cell.value)
             link_cell.style = "Hyperlink"
-    if sheet.max_row >= 2:
-        table = Table(displayName="ResumoColeta", ref=sheet.dimensions)
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
-        )
-        sheet.add_table(table)
+    _add_table(sheet, "ResumoRpa")

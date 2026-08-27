@@ -13,10 +13,8 @@ class SpreadsheetError(PriceCollectorError):
 
 
 class ProviderError(PriceCollectorError):
-    """Raised when an upstream provider returns an invalid response."""
+    """Raised when a marketplace cannot be collected."""
 
 
-class ProviderHttpError(ProviderError):
-    def __init__(self, status_code: int | None, message: str) -> None:
-        super().__init__(message)
-        self.status_code = status_code
+class BrowserBlockedError(ProviderError):
+    """Raised when the marketplace presents a CAPTCHA or automation block."""

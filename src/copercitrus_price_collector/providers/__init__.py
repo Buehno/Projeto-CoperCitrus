@@ -2,6 +2,6 @@
 
 from .base import PriceProvider
 from .google_shopping import GoogleShoppingProvider
-from .shopee_affiliate import ShopeeAffiliateProvider
+from .shopee_affiliate import ShopeeProvider
 
-__all__ = ["GoogleShoppingProvider", "PriceProvider", "ShopeeAffiliateProvider"]
+__all__ = ["GoogleShoppingProvider", "PriceProvider", "ShopeeProvider"]

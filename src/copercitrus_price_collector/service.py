@@ -32,7 +32,7 @@ class CollectionService:
                     self.sleeper(self.request_delay_seconds)
                 requests_made += 1
                 try:
-                    results = provider.search(product.query, self.result_limit)
+                    results = provider.search(product, self.result_limit)
                 except ProviderError as exc:
                     rows.append(CollectionRow.failed(product, provider.name, str(exc)))
                     continue

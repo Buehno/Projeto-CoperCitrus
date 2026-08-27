@@ -11,3 +11,7 @@ dist/
 build/
 resultados/
 *.log
+*.xlsx
+*.xls
+*.csv
+*.zip

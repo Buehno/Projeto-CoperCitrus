@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..models import SearchResult
+from ..models import ProductInput, SearchResult
 
 
 class PriceProvider(Protocol):
     name: str
 
-    def search(self, query: str, limit: int) -> list[SearchResult]: ...
+    def search(self, product: ProductInput, limit: int) -> list[SearchResult]: ...

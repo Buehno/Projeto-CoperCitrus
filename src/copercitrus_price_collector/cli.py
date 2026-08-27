@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 
+from .browser import BrowserRpa
 from .errors import ConfigurationError, PriceCollectorError
-from .http import UrllibJsonHttpClient
-from .providers import GoogleShoppingProvider, PriceProvider, ShopeeAffiliateProvider
+from .providers import GoogleShoppingProvider, PriceProvider, ShopeeProvider
 from .service import CollectionService
 from .settings import Settings
 from .spreadsheet import create_template, export_results, read_products
@@ -14,14 +15,14 @@ from .spreadsheet import create_template, export_results, read_products
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="copercitrus-price",
-        description="Coleta precos do Google Shopping e Shopee a partir de um Excel.",
+        description="RPA de precos do Google Shopping e Shopee a partir de um Excel.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     template = subcommands.add_parser("template", help="cria uma planilha-modelo")
     template.add_argument("output", nargs="?", default="produtos.xlsx")
 
-    collect = subcommands.add_parser("collect", help="processa uma planilha")
+    collect = subcommands.add_parser("collect", help="processa uma planilha via browser")
     collect.add_argument("input")
     collect.add_argument("--output", default="resultados/precos.xlsx")
     collect.add_argument("--sheet")
@@ -29,36 +30,30 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--limit", type=int)
     collect.add_argument("--max-products", type=int, default=1000)
     collect.add_argument("--delay", type=float)
+    collect.add_argument(
+        "--headed",
+        action="store_true",
+        help="exibe o Chromium durante a execucao",
+    )
+    collect.add_argument(
+        "--browser-channel",
+        choices=("chrome", "msedge"),
+        help="usa o Chrome ou Edge instalado em vez do Chromium do Playwright",
+    )
     return parser
 
 
-def _build_providers(
-    selected: list[str], settings: Settings, http: UrllibJsonHttpClient
-) -> list[PriceProvider]:
+def _build_providers(selected: list[str], browser: BrowserRpa) -> list[PriceProvider]:
     providers: list[PriceProvider] = []
     unknown = sorted(set(selected) - {"google", "shopee"})
     if unknown:
-        raise ConfigurationError(f"Provider desconhecido: {', '.join(unknown)}")
+        raise ConfigurationError(f"Fonte desconhecida: {', '.join(unknown)}")
     if "google" in selected:
-        if not settings.serpapi_key:
-            raise ConfigurationError("SERPAPI_KEY e obrigatoria para o provider google")
-        providers.append(
-            GoogleShoppingProvider(
-                settings.serpapi_key, http, location=settings.google_location
-            )
-        )
+        providers.append(GoogleShoppingProvider(browser))
     if "shopee" in selected:
-        if not settings.shopee_app_id or not settings.shopee_app_secret:
-            raise ConfigurationError(
-                "SHOPEE_APP_ID e SHOPEE_APP_SECRET sao obrigatorias para shopee"
-            )
-        providers.append(
-            ShopeeAffiliateProvider(
-                settings.shopee_app_id, settings.shopee_app_secret, http
-            )
-        )
+        providers.append(ShopeeProvider(browser))
     if not providers:
-        raise ConfigurationError("Selecione ao menos um provider")
+        raise ConfigurationError("Selecione ao menos uma fonte")
     return providers
 
 
@@ -71,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         settings = Settings.from_env()
+        if args.headed:
+            settings = replace(settings, headless=False)
+        if args.browser_channel:
+            settings = replace(settings, browser_channel=args.browser_channel)
+
         selected = [
             item.strip().casefold() for item in args.providers.split(",") if item.strip()
         ]
@@ -86,16 +86,21 @@ def main(argv: list[str] | None = None) -> int:
             raise ConfigurationError("--delay nao pode ser negativo")
 
         products = read_products(args.input, args.sheet, args.max_products)
-        http = UrllibJsonHttpClient(settings.timeout_seconds, settings.max_retries)
-        providers = _build_providers(selected, settings, http)
-        service = CollectionService(providers, limit, delay)
-        rows = service.collect(products)
+        with BrowserRpa(settings) as browser:
+            providers = _build_providers(selected, browser)
+            rows = CollectionService(providers, limit, delay).collect(products)
+
         destination = export_results(rows, args.output)
         offers = sum(1 for row in rows if row.status == "OK")
+        similars = sum(
+            1
+            for row in rows
+            if row.result is not None and row.result.possible_similar
+        )
         errors = sum(1 for row in rows if row.status == "ERRO")
         print(
             f"Concluido: {len(products)} produtos, {offers} ofertas, "
-            f"{errors} erros. Arquivo: {destination}"
+            f"{similars} similares e {errors} erros. Arquivo: {destination}"
         )
         return 0 if not errors else 1
     except PriceCollectorError as exc:
