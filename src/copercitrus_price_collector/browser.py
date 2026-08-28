@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -32,6 +33,7 @@ BLOCK_MARKERS = (
     "verify you are human",
     "verifique se voce e humano",
 )
+MANUAL_VERIFICATION_ATTEMPTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +64,7 @@ class BrowserRpa:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
+        self._connected_over_cdp = False
 
     def __enter__(self) -> BrowserRpa:
         self.start()
@@ -81,26 +84,59 @@ class BrowserRpa:
             }
             if self.settings.browser_channel:
                 launch_options["channel"] = self.settings.browser_channel
-            self._browser = self._playwright.chromium.launch(**launch_options)
-            self._context = self._browser.new_context(
-                locale="pt-BR",
-                timezone_id="America/Sao_Paulo",
-                viewport={"width": 1440, "height": 1000},
-            )
+            if self.settings.browser_cdp_url:
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    self.settings.browser_cdp_url
+                )
+                self._connected_over_cdp = True
+                contexts = self._browser.contexts
+                if not contexts:
+                    raise ConfigurationError("Nenhum contexto encontrado no Chrome")
+                self._context = contexts[0]
+                return
+            context_options = {
+                "locale": "pt-BR",
+                "timezone_id": "America/Sao_Paulo",
+                "viewport": {"width": 1440, "height": 1000},
+            }
+            if self.settings.browser_user_data_dir:
+                user_data_dir = Path(self.settings.browser_user_data_dir).expanduser()
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    str(user_data_dir), **launch_options, **context_options
+                )
+                for page in self._context.pages:
+                    if page.url == "about:blank":
+                        page.close()
+            else:
+                self._browser = self._playwright.chromium.launch(**launch_options)
+                self._context = self._browser.new_context(**context_options)
         except Exception as exc:
             self.close()
+            if self.settings.browser_cdp_url:
+                raise ConfigurationError(
+                    f"Nao foi possivel conectar ao Chrome em "
+                    f"{self.settings.browser_cdp_url}. Feche todas as janelas "
+                    "do Chrome e inicie uma instancia com "
+                    "--remote-debugging-port=9222 e um --user-data-dir "
+                    "dedicado; depois confirme a porta 9222 e tente novamente."
+                ) from exc
             raise ConfigurationError(
                 "Nao foi possivel iniciar o Chromium. Execute: "
                 "python -m playwright install chromium"
             ) from exc
 
     def close(self) -> None:
-        if self._context is not None:
+        if self._context is not None and not self._connected_over_cdp:
             self._context.close()
             self._context = None
-        if self._browser is not None:
+        elif self._connected_over_cdp:
+            self._context = None
+        if self._browser is not None and not self._connected_over_cdp:
             self._browser.close()
             self._browser = None
+        elif self._browser is not None:
+            self._browser = None
+            self._connected_over_cdp = False
         if self._playwright is not None:
             self._playwright.stop()
             self._playwright = None
@@ -114,14 +150,19 @@ class BrowserRpa:
     ) -> list[BrowserProductCard]:
         if self._context is None:
             raise ConfigurationError("Browser RPA nao foi iniciado")
-        page = self._context.new_page()
+        reuse_page = self._connected_over_cdp and bool(self._context.pages)
+        page = self._context.pages[0] if reuse_page else self._context.new_page()
         timeout_ms = int(self.settings.browser_timeout_seconds * 1000)
         page.set_default_timeout(timeout_ms)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             page.locator("body").wait_for(state="visible", timeout=timeout_ms)
             self._dismiss_cookie_banner(page)
-            self._raise_if_blocked(page, provider_name)
+            try:
+                self._raise_if_blocked(page, provider_name)
+            except BrowserBlockedError:
+                if not self._request_manual_verification(page, provider_name):
+                    raise
             cards = self._find_cards(page, selectors.cards, timeout_ms)
             results: list[BrowserProductCard] = []
             seen: set[str] = set()
@@ -167,7 +208,8 @@ class BrowserRpa:
         except Exception as exc:
             raise ProviderError(f"{provider_name}: falha durante a navegacao RPA") from exc
         finally:
-            page.close()
+            if not reuse_page:
+                page.close()
 
     @staticmethod
     def _dismiss_cookie_banner(page: Page) -> None:
@@ -189,6 +231,28 @@ class BrowserRpa:
                 f"{provider_name}: bloqueio ou CAPTCHA detectado; "
                 "o RPA nao tenta contornar a protecao"
             )
+
+    def _request_manual_verification(self, page: Page, provider_name: str) -> bool:
+        if self.settings.headless and not self.settings.browser_cdp_url:
+            return False
+        print(
+            f"{provider_name}: bloqueio/CAPTCHA detectado. Resolva manualmente "
+            f"na aba aberta e pressione Enter (ate {MANUAL_VERIFICATION_ATTEMPTS} tentativas)."
+        )
+        for attempt in range(1, MANUAL_VERIFICATION_ATTEMPTS + 1):
+            try:
+                input(f"Tentativa {attempt}/{MANUAL_VERIFICATION_ATTEMPTS} - pressione Enter apos resolver: ")
+            except EOFError:
+                return False
+            try:
+                self._raise_if_blocked(page, provider_name)
+            except BrowserBlockedError:
+                if attempt < MANUAL_VERIFICATION_ATTEMPTS:
+                    print("A protecao ainda esta presente; conclua a verificacao na aba.")
+                    continue
+                return False
+            return True
+        return False
 
     @staticmethod
     def _find_cards(page: Page, selectors: tuple[str, ...], timeout_ms: int) -> Locator:

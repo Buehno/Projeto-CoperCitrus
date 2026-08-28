@@ -18,10 +18,24 @@ from .models import CollectionRow, ProductInput
 
 
 HEADER_ALIASES = {
-    "produto": {"produto", "nome", "nomeproduto", "item", "descricaoproduto"},
-    "marca": {"marca"},
+    "produto": {
+        "produto",
+        "nome",
+        "nomeproduto",
+        "item",
+        "descricao",
+        "descricaoproduto",
+    },
+    "marca": {"marca", "fornecedor", "fabricante"},
     "modelo": {"modelo"},
-    "sku": {"sku", "codigo", "codigoproduto", "codigodoproduto", "coditem"},
+    "sku": {
+        "sku",
+        "material",
+        "codigo",
+        "codigoproduto",
+        "codigodoproduto",
+        "coditem",
+    },
     "quantidade": {"quantidade", "qtd", "qtde", "quantidadesolicitada"},
 }
 
@@ -110,7 +124,20 @@ def read_products(
         else:
             sheet = workbook.active
 
-        header_values = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        header_row = _find_header_row(sheet)
+        if header_row is None:
+            first_row = next(
+                sheet.iter_rows(min_row=1, max_row=1, values_only=True), None
+            )
+            if not first_row or not any(_cell_text(value) for value in first_row):
+                raise SpreadsheetError("A planilha esta vazia")
+            raise SpreadsheetError("Coluna obrigatoria 'Produto' nao encontrada")
+        header_values = next(
+            sheet.iter_rows(
+                min_row=header_row, max_row=header_row, values_only=True
+            ),
+            None,
+        )
         if not header_values:
             raise SpreadsheetError("A planilha esta vazia")
         normalized = [_normalize_header(value) for value in header_values]
@@ -125,7 +152,8 @@ def read_products(
 
         products: list[ProductInput] = []
         for row_number, values in enumerate(
-            sheet.iter_rows(min_row=2, values_only=True), start=2
+            sheet.iter_rows(min_row=header_row + 1, values_only=True),
+            start=header_row + 1,
         ):
             produto = _value_at(values, indexes.get("produto"))
             marca = _value_at(values, indexes.get("marca"))
@@ -144,7 +172,11 @@ def read_products(
                     f"A planilha excede o limite de {max_products} produtos"
                 )
         if not products:
-            raise SpreadsheetError("Nenhum produto preenchido foi encontrado")
+            raise SpreadsheetError(
+                f"A planilha '{source.resolve()}' nao possui produtos preenchidos. "
+                "Digite um nome na coluna 'Produto' a partir da linha 2, salve o "
+                "arquivo e execute novamente."
+            )
         return products
     finally:
         workbook.close()
@@ -154,6 +186,18 @@ def _value_at(values: tuple[object, ...], index: int | None) -> str | None:
     if index is None or index >= len(values):
         return None
     return _cell_text(values[index])
+
+
+def _find_header_row(sheet) -> int | None:
+    for row_number, values in enumerate(
+        sheet.iter_rows(min_row=1, max_row=10, values_only=True), start=1
+    ):
+        normalized = {_normalize_header(value) for value in values}
+        if normalized & HEADER_ALIASES["produto"] and normalized & HEADER_ALIASES["sku"]:
+            return row_number
+        if "produto" in normalized:
+            return row_number
+    return None
 
 
 def create_template(path: str | Path) -> Path:

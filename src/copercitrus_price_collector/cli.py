@@ -40,6 +40,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=("chrome", "msedge"),
         help="usa o Chrome ou Edge instalado em vez do Chromium do Playwright",
     )
+    collect.add_argument(
+        "--browser-user-data-dir",
+        help="usa um perfil persistente do navegador e preserva a sessao local",
+    )
+    collect.add_argument(
+        "--browser-cdp-url",
+        help="conecta a um Chrome ja aberto com depuracao remota, por exemplo http://127.0.0.1:9222",
+    )
     return parser
 
 
@@ -70,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
             settings = replace(settings, headless=False)
         if args.browser_channel:
             settings = replace(settings, browser_channel=args.browser_channel)
+        if args.browser_user_data_dir:
+            settings = replace(
+                settings, browser_user_data_dir=args.browser_user_data_dir
+            )
+        if args.browser_cdp_url:
+            settings = replace(settings, browser_cdp_url=args.browser_cdp_url)
 
         selected = [
             item.strip().casefold() for item in args.providers.split(",") if item.strip()

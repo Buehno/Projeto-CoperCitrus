@@ -44,6 +44,8 @@ def _bool_env(name: str, default: bool) -> bool:
 class Settings:
     headless: bool
     browser_channel: str | None
+    browser_user_data_dir: str | None
+    browser_cdp_url: str | None
     browser_timeout_seconds: float
     slow_mo_ms: int
     request_delay_seconds: float
@@ -54,6 +56,8 @@ class Settings:
         settings = cls(
             headless=_bool_env("RPA_HEADLESS", True),
             browser_channel=os.getenv("RPA_BROWSER_CHANNEL") or None,
+            browser_user_data_dir=os.getenv("RPA_BROWSER_USER_DATA_DIR") or None,
+            browser_cdp_url=os.getenv("RPA_BROWSER_CDP_URL") or None,
             browser_timeout_seconds=_float_env("RPA_BROWSER_TIMEOUT_SECONDS", 45.0),
             slow_mo_ms=_int_env("RPA_SLOW_MO_MS", 0),
             request_delay_seconds=_float_env("REQUEST_DELAY_SECONDS", 2.0),
