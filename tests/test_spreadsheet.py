@@ -79,6 +79,9 @@ class SpreadsheetTest(unittest.TestCase):
                 "https://shopee.example/item",
                 workbook["Resumo"]["J2"].hyperlink.target,
             )
+            self.assertEqual("Maior preco", workbook["Resumo"]["K1"].value)
+            self.assertEqual("Fonte maior preco", workbook["Resumo"]["L1"].value)
+            self.assertEqual("Link de compra mais caro", workbook["Resumo"]["M1"].value)
             workbook.close()
 
 

@@ -378,6 +378,9 @@ def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
             "Menor preco",
             "Fonte menor preco",
             "Link de compra",
+            "Maior preco",
+            "Fonte maior preco",
+            "Link de compra mais caro",
         ]
     )
     grouped: dict[tuple[str, str | None], list[CollectionRow]] = defaultdict(list)
@@ -391,7 +394,9 @@ def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
             if row.result is not None and row.result.price_min is not None
         ]
         cheapest = min(successes, key=lambda row: row.result.price_min) if successes else None
-        result = cheapest.result if cheapest else None
+        expensive = max(successes, key=lambda row: row.result.price_min) if successes else None
+        cheapest_result = cheapest.result if cheapest else None
+        expensive_result = expensive.result if expensive else None
         product = product_rows[0].product
         sheet.append(
             [
@@ -410,9 +415,12 @@ def _build_summary_sheet(workbook: Workbook, rows: list[CollectionRow]) -> None:
                     for row in product_rows
                     if row.result is not None and row.result.possible_similar
                 ),
-                result.price_min if result else None,
+                cheapest_result.price_min if cheapest_result else None,
                 cheapest.provider if cheapest else None,
-                result.purchase_url if result else None,
+                cheapest_result.purchase_url if cheapest_result else None,
+                expensive_result.price_min if expensive_result else None,
+                expensive.provider if expensive else None,
+                expensive_result.purchase_url if expensive_result else None,
             ]
         )
 

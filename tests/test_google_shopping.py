@@ -1,6 +1,11 @@
 import unittest
 
-from copercitrus_price_collector.browser import BrowserProductCard
+from copercitrus_price_collector.browser import (
+    BLOCK_MARKERS,
+    BrowserBlockedError,
+    BrowserProductCard,
+    BrowserRpa,
+)
 from copercitrus_price_collector.models import ProductInput
 from copercitrus_price_collector.providers.google_shopping import GoogleShoppingProvider
 
@@ -41,6 +46,23 @@ class GoogleShoppingProviderTest(unittest.TestCase):
         self.assertIn("tbm=shop", browser.calls[0][1])
         self.assertIn("Mouse+sem+fio+Logitech+M170+SKU-1", browser.calls[0][1])
         self.assertNotIn("api", browser.calls[0][1].casefold())
+
+    def test_detects_google_verification_prompt_as_block(self):
+        class Body:
+            def __init__(self, text):
+                self.text = text
+
+            def inner_text(self, timeout=0):
+                return self.text
+
+        class Page:
+            def locator(self, selector):
+                return Body("Verifique para continuar")
+
+        with self.assertRaises(BrowserBlockedError):
+            BrowserRpa._raise_if_blocked(Page(), "Google Shopping")
+
+        self.assertIn("verifique para continuar", " ".join(BLOCK_MARKERS).casefold())
 
 
 if __name__ == "__main__":

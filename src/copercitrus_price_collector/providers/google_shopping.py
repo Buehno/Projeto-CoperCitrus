@@ -15,12 +15,18 @@ GOOGLE_SELECTORS = SiteSelectors(
         ".sh-dgr__content",
         ".sh-dlr__list-result",
         ".pla-unit",
+        "div[role='listitem']",
+        "div[aria-label*='resultado']",
+        "div[aria-label*='product']",
+        "div[role='article']",
     ),
     titles=(
         "h3",
+        "h2",
         ".tAxDx",
         ".sh-np__product-title",
         "[role='heading']",
+        "div[role='heading']",
     ),
     prices=(
         ".a8Pemb",
@@ -28,10 +34,12 @@ GOOGLE_SELECTORS = SiteSelectors(
         ".T14wmb",
         ".HRLxBb",
         "[aria-label*='R$']",
+        "span[aria-label*='R$']",
+        "div[data-price]",
     ),
-    links=("a[href]",),
-    descriptions=(".vEjMR", ".sh-np__product-title", ".hP4iBf"),
-    sellers=(".aULzUe", ".IuHnof", ".sh-np__seller-container"),
+    links=("a[href]", "a[href*='/shopping/product/']", "a[href*='/products/']"),
+    descriptions=(".vEjMR", ".sh-np__product-title", ".hP4iBf", ".b5YqMe"),
+    sellers=(".aULzUe", ".IuHnof", ".sh-np__seller-container", "div[aria-label*='loja']"),
 )
 
 

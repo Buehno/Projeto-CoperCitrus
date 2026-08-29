@@ -29,9 +29,15 @@ BLOCK_MARKERS = (
     "checking your browser",
     "nossos sistemas detectaram trafego incomum",
     "robot check",
+    "tente novamente",
+    "too many requests",
+    "try again",
     "unusual traffic",
     "verify you are human",
+    "verifique para continuar",
     "verifique se voce e humano",
+    "verifique se voce e um robo",
+    "verifique se você é humano",
 )
 MANUAL_VERIFICATION_ATTEMPTS = 5
 
@@ -205,7 +211,13 @@ class BrowserRpa:
             ) from exc
         except ProviderError:
             raise
+        except KeyboardInterrupt:
+            raise
         except Exception as exc:
+            if "Target page, context or browser has been closed" in str(exc):
+                raise ProviderError(
+                    f"{provider_name}: o navegador foi fechado durante a coleta"
+                ) from exc
             raise ProviderError(f"{provider_name}: falha durante a navegacao RPA") from exc
         finally:
             if not reuse_page:
@@ -256,7 +268,8 @@ class BrowserRpa:
 
     @staticmethod
     def _find_cards(page: Page, selectors: tuple[str, ...], timeout_ms: int) -> Locator:
-        combined = page.locator(", ".join(selectors))
+        candidate_selectors = tuple(dict.fromkeys(selectors + ("div[role='listitem']", "[data-docid]", "a[href]")))
+        combined = page.locator(", ".join(candidate_selectors))
         try:
             combined.first.wait_for(state="visible", timeout=timeout_ms)
         except PlaywrightTimeoutError:

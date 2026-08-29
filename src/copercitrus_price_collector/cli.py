@@ -66,7 +66,10 @@ def _build_providers(selected: list[str], browser: BrowserRpa) -> list[PriceProv
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    try:
+        args = _parser().parse_args(argv)
+    except KeyboardInterrupt:
+        return 130
     try:
         if args.command == "template":
             destination = create_template(args.output)
@@ -117,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{similars} similares e {errors} erros. Arquivo: {destination}"
         )
         return 0 if not errors else 1
+    except KeyboardInterrupt:
+        print("Coleta interrompida pelo usuario.", file=sys.stderr)
+        return 130
     except PriceCollectorError as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 2
