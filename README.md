@@ -155,36 +155,35 @@ copercitrus-price collect produtos.xlsx --no-db
 O banco e um registro paralelo: se o PostgreSQL estiver fora, a coleta emite um
 aviso e o Excel continua sendo gerado normalmente.
 
-## API HTTP
+## Dashboard
 
-`copercitrus_price_collector.web:app` e o processo que fica no ar em producao.
-Documentacao interativa em `/docs`.
+`copercitrus_price_collector.web:app` e a aplicacao que fica no ar. Ela e
+**somente leitura**: le o PostgreSQL e apresenta os insights. Nao existe
+entrada de dados pela web — nenhuma rota `POST`, `PUT` ou `DELETE`.
 
-| Metodo | Rota | Uso |
-|---|---|---|
-| `GET` | `/health` | Healthcheck; `200` com banco ok, `503` degradado |
-| `POST` | `/buscas` | Dispara uma coleta a partir de uma lista JSON de produtos |
-| `POST` | `/buscas/planilha` | Dispara uma coleta enviando um `.xlsx` (multipart) |
-| `GET` | `/buscas` | Historico de coletas |
-| `GET` | `/buscas/{id}` | Status e totais de uma coleta |
-| `GET` | `/buscas/{id}/resultados` | Ofertas gravadas no banco |
-| `GET` | `/buscas/{id}/planilha` | Excel da coleta, enquanto o container viver |
+A ingestao continua sendo o CLI (`copercitrus-price collect`), que grava nas
+mesmas tabelas. Isso mantem o Playwright fora do processo web.
 
-Uma coleta leva minutos, entao os dois `POST` respondem `202` na hora com o
-`coleta_id` e a execucao segue em segundo plano; acompanhe por
-`GET /buscas/{id}` ate o status virar `CONCLUIDA` ou `FALHOU`. So roda uma
-coleta por vez — uma segunda chamada simultanea recebe `409`.
+O dashboard mostra:
 
-```bash
-curl -X POST http://localhost:8000/buscas \
-  -H 'Content-Type: application/json' \
-  -H "X-API-Key: $API_KEY" \
-  -d '{"produtos":[{"produto":"Oleo lubrificante","marca":"Ipiranga"}],"limit":5}'
-```
+- indicadores gerais: produtos, ofertas, buscas, coletas, preco medio e erros;
+- ofertas por fonte e aderencia ao produto pedido (`COMPATIVEL`/`SIMILAR`/`DIVERGENTE`);
+- **maior economia potencial**: produtos com maior diferenca entre a oferta mais cara e a mais barata;
+- **menor preco por produto**, com o titulo e o link do proprio anuncio;
+- buscas que nao retornaram oferta, com o motivo.
 
-Se a variavel `API_KEY` estiver definida, os dois `POST` passam a exigir o
-header `X-API-Key`. As rotas de leitura permanecem abertas. **Defina `API_KEY`
-em producao**: sem ela qualquer pessoa com a URL dispara coletas no seu servico.
+| Rota | Uso |
+|---|---|
+| `GET /` | O dashboard (HTML) |
+| `GET /health` | Healthcheck; `200` com banco ok, `503` degradado |
+| `GET /api/resumo` | Indicadores, ofertas por fonte e classificacao (JSON) |
+| `GET /api/precos` | Menor preco por produto (JSON) |
+| `GET /api/coletas` | Historico de coletas (JSON) |
+| `GET /api/coletas/{id}/resultados` | Ofertas de uma coleta (JSON) |
+| `GET /api/docs` | Documentacao interativa |
+
+Titulos, vendedores e links vem de paginas de terceiros: o HTML e escapado e
+somente URLs `http`/`https` viram link.
 
 Localmente:
 
@@ -198,19 +197,18 @@ uvicorn copercitrus_price_collector.web:app --reload
    o `Dockerfile`, define o healthcheck em `/health` e o start command.
 2. No projeto, adicione um banco **PostgreSQL**. O Railway injeta `DATABASE_URL`
    no servico automaticamente — nao e preciso copiar nada.
-3. Em *Variables*, defina `API_KEY` com um valor secreto.
-4. Faca o commit. O deploy sobe, as tabelas sao criadas na primeira conexao e o
+3. Faca o commit. O deploy sobe, as tabelas sao criadas na primeira conexao e o
    healthcheck responde `200`.
 
 Variaveis opcionais: `RESULT_LIMIT`, `REQUEST_DELAY_SECONDS`,
 `RPA_BROWSER_TIMEOUT_SECONDS`. `PORT` e `RPA_HEADLESS` ja vem prontos.
 
-O `/buscas/{id}/planilha` grava em disco efemero: o arquivo some a cada deploy
-ou restart. Os dados persistidos ficam no PostgreSQL.
+Como a aplicacao nao escreve nada, alimente o banco rodando o CLI com a mesma
+`DATABASE_URL` do servico.
 
 ## Docker
 
-A imagem sobe a API por padrao:
+A imagem sobe o dashboard por padrao:
 
 ```bash
 docker build -t copercitrus-rpa .

@@ -174,8 +174,10 @@ class BrowserRpa:
             seen: set[str] = set()
             for index in range(min(cards.count(), max(limit * 3, limit))):
                 card = cards.nth(index)
-                title = self._first_text(card, selectors.titles)
-                link = self._first_attribute(card, selectors.links, "href")
+                found_title = self._first_text_node(card, selectors.titles)
+                title = found_title[0] if found_title else None
+                title_node = found_title[1] if found_title else None
+                link = self._link_for_title(title_node, card, selectors.links)
                 if not title or not link:
                     continue
                 purchase_url = urljoin(page.url, link)
@@ -268,26 +270,76 @@ class BrowserRpa:
 
     @staticmethod
     def _find_cards(page: Page, selectors: tuple[str, ...], timeout_ms: int) -> Locator:
-        candidate_selectors = tuple(dict.fromkeys(selectors + ("div[role='listitem']", "[data-docid]", "a[href]")))
-        combined = page.locator(", ".join(candidate_selectors))
+        candidate_selectors = tuple(
+            dict.fromkeys(selectors + ("div[role='listitem']", "[data-docid]"))
+        )
+        combined = page.locator(", ".join(candidate_selectors + ("a[href]",)))
         try:
             combined.first.wait_for(state="visible", timeout=timeout_ms)
         except PlaywrightTimeoutError:
             return combined
+        # Usa o seletor mais especifico que casar, em vez da lista CSS inteira:
+        # combinando tudo, um container e o filho dele viram "cards" distintos e
+        # o titulo de um anuncio acaba pareado com o link de outro.
+        for selector in candidate_selectors:
+            locator = page.locator(selector)
+            try:
+                if locator.count():
+                    return locator
+            except PlaywrightTimeoutError:
+                continue
         return combined
 
     @staticmethod
-    def _first_text(root: Locator, selectors: tuple[str, ...]) -> str | None:
+    def _first_text_node(
+        root: Locator, selectors: tuple[str, ...]
+    ) -> tuple[str, Locator] | None:
+        """Primeiro elemento visivel com texto, junto do proprio locator.
+
+        Devolver o locator permite amarrar o link ao mesmo no do titulo.
+        """
+
         for selector in selectors:
             locator = root.locator(selector).first
             try:
                 if locator.count() and locator.is_visible():
                     text = locator.inner_text(timeout=1000).strip()
                     if text:
-                        return text
+                        return text, locator
             except PlaywrightTimeoutError:
                 continue
         return None
+
+    @staticmethod
+    def _first_text(root: Locator, selectors: tuple[str, ...]) -> str | None:
+        found = BrowserRpa._first_text_node(root, selectors)
+        return found[0] if found else None
+
+    @staticmethod
+    def _link_for_title(
+        title_node: Locator | None,
+        card: Locator,
+        link_selectors: tuple[str, ...],
+    ) -> str | None:
+        """URL do anuncio a que o titulo pertence.
+
+        Prioriza a ancora mais proxima que envolve o proprio titulo. Sem isso,
+        titulo e link sao buscados de forma independente dentro do card e um
+        container com varios anuncios casa o nome de um produto com o link de
+        outro. So cai no seletor generico do card quando o titulo nao esta
+        dentro de nenhum link.
+        """
+
+        if title_node is not None:
+            try:
+                anchor = title_node.locator("xpath=ancestor-or-self::a[@href][1]")
+                if anchor.count():
+                    value = anchor.first.get_attribute("href", timeout=1000)
+                    if value and value.strip():
+                        return value.strip()
+            except PlaywrightTimeoutError:
+                pass
+        return BrowserRpa._first_attribute(card, link_selectors, "href")
 
     @staticmethod
     def _first_attribute(root: Locator, selectors: tuple[str, ...], name: str) -> str | None:

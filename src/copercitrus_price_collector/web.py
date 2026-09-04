@@ -1,66 +1,30 @@
-"""API HTTP do RPA de precos.
+"""Dashboard de precos.
 
-E o processo que o Railway mantem no ar: expoe o healthcheck, dispara coletas e
-serve o historico gravado no PostgreSQL.
+Aplicacao somente leitura: consome o PostgreSQL alimentado pelo CLI do RPA e
+apresenta os insights. Nao existe entrada de dados pela web — a coleta e feita
+por `copercitrus-price collect`, que grava nas mesmas tabelas.
 """
 
 from __future__ import annotations
 
+import html
 import logging
-import os
-import tempfile
 import threading
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
-from typing import Annotated, Any, Literal
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import __version__
 from .database import Database, DatabaseError, database_url
-from .errors import PriceCollectorError
-from .models import ProductInput
-from .runner import KNOWN_PROVIDERS, execute_collection, parse_providers
-from .settings import Settings
-from .spreadsheet import export_results, read_products
 
 logger = logging.getLogger("copercitrus.web")
 
-MAX_PRODUTOS = 1000
-MAX_UPLOAD_BYTES = 5 * 1024 * 1024
-
 _state: dict[str, Any] = {"database": None, "schema_ready": False}
-_collection_lock = threading.Lock()
-_artifacts_dir = Path(tempfile.gettempdir()) / "copercitrus-resultados"
-
-
-# --------------------------------------------------------------------- schemas
-
-
-class ProdutoIn(BaseModel):
-    produto: str = Field(min_length=1, max_length=300)
-    marca: str | None = Field(default=None, max_length=200)
-    modelo: str | None = Field(default=None, max_length=200)
-    sku: str | None = Field(default=None, max_length=100)
-    quantidade: str | None = Field(default=None, max_length=100)
-
-
-class BuscaIn(BaseModel):
-    produtos: list[ProdutoIn] = Field(min_length=1, max_length=MAX_PRODUTOS)
-    providers: list[Literal["google", "shopee"]] = Field(
-        default_factory=lambda: list(KNOWN_PROVIDERS)
-    )
-    limit: int = Field(default=5, ge=1, le=20)
-    delay: float | None = Field(default=None, ge=0, le=60)
-
-
-class ColetaAceita(BaseModel):
-    coleta_id: int
-    status: str
-    total_produtos: int
-    detalhe: str
 
 
 # ------------------------------------------------------------------ infra
@@ -78,11 +42,7 @@ def get_database() -> Database:
 
 
 def ensure_schema(db: Database) -> None:
-    """Garante o schema na primeira operacao bem-sucedida.
-
-    Se o PostgreSQL ainda nao estava de pe quando a API subiu, a criacao das
-    tabelas acontece aqui, sem exigir um novo deploy.
-    """
+    """Cria o schema na primeira operacao que conseguir conectar."""
 
     if _state.get("schema_ready"):
         return
@@ -93,40 +53,13 @@ def ensure_schema(db: Database) -> None:
     _state["schema_ready"] = True
 
 
-def require_api_key(
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
-) -> None:
-    """Protege os endpoints de escrita quando API_KEY esta definida.
-
-    Sem API_KEY configurada a API fica aberta, o que so e aceitavel em rede
-    privada; em producao no Railway defina a variavel.
-    """
-
-    expected = os.getenv("API_KEY", "").strip()
-    if not expected:
-        return
-    if not x_api_key or not _constant_time_equals(x_api_key, expected):
-        raise HTTPException(status_code=401, detail="X-API-Key ausente ou invalida")
-
-
-def _constant_time_equals(left: str, right: str) -> bool:
-    from hmac import compare_digest
-
-    return compare_digest(left.encode("utf-8"), right.encode("utf-8"))
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     dsn = database_url()
     if not dsn:
-        logger.error(
-            "DATABASE_URL nao configurada: a API sobe, mas /buscas ficara indisponivel."
-        )
+        logger.error("DATABASE_URL nao configurada: o dashboard ficara indisponivel.")
     else:
         db = Database(dsn)
-        # wait=False: o startup nunca bloqueia nem quebra por causa do banco.
-        # O Railway consegue subir o container mesmo se o Postgres demorar, e o
-        # schema e criado na primeira requisicao que conseguir conectar.
         db.open(wait=False)
         _state["database"] = db
         _state["schema_ready"] = False
@@ -135,19 +68,14 @@ async def lifespan(app: FastAPI):
             try:
                 db.create_schema()
             except DatabaseError as exc:
-                logger.warning(
-                    "Schema sera criado na primeira requisicao bem-sucedida: %s", exc
-                )
+                logger.warning("Schema pendente ate a primeira conexao: %s", exc)
                 return
             _state["schema_ready"] = True
             logger.info("PostgreSQL conectado e schema verificado.")
 
-        # Fora da thread do startup: o container abre a porta imediatamente e o
-        # healthcheck do Railway nao espera o handshake do banco.
         threading.Thread(
             target=preparar_schema, name="schema-init", daemon=True
         ).start()
-    _artifacts_dir.mkdir(parents=True, exist_ok=True)
     try:
         yield
     finally:
@@ -160,99 +88,280 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="CoperCitrus — RPA de pesquisa de precos",
+    title="CoperCitrus — Dashboard de precos",
     version=__version__,
     lifespan=lifespan,
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
 )
 
 
-# ------------------------------------------------------------------ execucao
+# ------------------------------------------------------------- formatacao
 
 
-def _run_in_background(
-    products: list[ProductInput],
-    providers: list[str],
-    limit: int,
-    delay: float | None,
-    extra: dict[str, Any],
-) -> int:
-    """Registra a coleta e dispara a execucao numa thread dedicada.
+def esc(value: Any) -> str:
+    """Escapa para HTML. Titulos e vendedores vem de paginas de terceiros."""
 
-    O Playwright sincrono nao pode rodar na thread do event loop, e uma coleta
-    leva minutos: por isso a API responde 202 e o cliente acompanha por
-    GET /buscas/{id}.
-    """
+    if value is None:
+        return "—"
+    return html.escape(str(value), quote=True)
 
-    db = get_database()
-    settings = Settings.from_env()
-    effective_delay = delay if delay is not None else settings.request_delay_seconds
 
-    if not _collection_lock.acquire(blocking=False):
-        raise HTTPException(
-            status_code=409,
-            detail="Ja existe uma coleta em andamento. Aguarde a conclusao.",
-        )
+def safe_url(value: Any) -> str | None:
+    """Aceita apenas http/https: o link tambem vem de conteudo raspado."""
 
+    if not value:
+        return None
     try:
-        coleta_id = db.start_run(
-            origem=extra.get("origem", "api"),
-            total_produtos=len(products),
-            parametros={
-                "providers": providers,
-                "limit": limit,
-                "delay": effective_delay,
-                **extra,
-            },
+        parsed = urlparse(str(value))
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return str(value)
+
+
+def moeda(value: Any, simbolo: str = "R$") -> str:
+    if value is None:
+        return "—"
+    try:
+        numero = Decimal(str(value))
+    except Exception:
+        return "—"
+    inteiro, _, decimal = f"{numero:,.2f}".partition(".")
+    return f"{simbolo} {inteiro.replace(',', '.')},{decimal}"
+
+
+def data_hora(value: Any) -> str:
+    if not isinstance(value, datetime):
+        return "—"
+    return value.strftime("%d/%m/%Y %H:%M")
+
+
+def dominio(url: str | None) -> str:
+    if not url:
+        return "—"
+    try:
+        return urlparse(url).netloc or "—"
+    except ValueError:
+        return "—"
+
+
+# ---------------------------------------------------------------- markup
+
+ESTILO = """
+:root{--bg:#f6f7f9;--card:#fff;--ink:#14181f;--muted:#5d6672;--line:#e3e7ec;
+--accent:#1f6f43;--accent-soft:#e6f2ea;--warn:#b45309;--bar:#2f8f5b}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1216;--card:#171b21;--ink:#e8ecf1;
+--muted:#98a2b0;--line:#252b33;--accent:#5fbe8a;--accent-soft:#16281f;--warn:#e0a355;--bar:#4aa876}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:32px 20px 64px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;
+margin-bottom:28px}
+h1{font-size:22px;margin:0;letter-spacing:-.01em}
+h2{font-size:15px;margin:0 0 14px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.sub{color:var(--muted);font-size:13px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:28px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.kpi .n{font-size:26px;font-weight:640;letter-spacing:-.02em}
+.kpi .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:22px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:22px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+color:var(--muted);font-weight:600;padding:0 10px 8px;border-bottom:1px solid var(--line)}
+td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.scroll{overflow-x:auto}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.prod{font-weight:560}
+.anuncio{color:var(--muted);font-size:12.5px;margin-top:2px;display:block}
+.host{color:var(--muted);font-size:11.5px}
+.bar{height:7px;background:var(--accent-soft);border-radius:4px;overflow:hidden;margin-top:5px}
+.bar span{display:block;height:100%;background:var(--bar)}
+.row{margin-bottom:13px}
+.row .t{display:flex;justify-content:space-between;font-size:13.5px;gap:10px}
+.tag{display:inline-block;font-size:11px;padding:2px 7px;border-radius:5px;
+background:var(--accent-soft);color:var(--accent);font-weight:600}
+.empty{text-align:center;padding:44px 20px;color:var(--muted)}
+.empty code{background:var(--accent-soft);color:var(--accent);padding:2px 7px;border-radius:5px}
+footer{margin-top:34px;color:var(--muted);font-size:12px;text-align:center}
+"""
+
+
+def _pagina(titulo: str, corpo: str) -> str:
+    return (
+        "<!doctype html><html lang='pt-BR'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{esc(titulo)}</title><style>{ESTILO}</style></head>"
+        f"<body><div class='wrap'>{corpo}</div></body></html>"
+    )
+
+
+def _barras(linhas: list[dict[str, Any]], rotulo: str, valor: str) -> str:
+    if not linhas:
+        return "<p class='sub'>Sem dados.</p>"
+    maximo = max((int(l[valor] or 0) for l in linhas), default=0) or 1
+    partes = []
+    for linha in linhas:
+        total = int(linha[valor] or 0)
+        pct = round(total * 100 / maximo)
+        partes.append(
+            f"<div class='row'><div class='t'><span>{esc(linha[rotulo])}</span>"
+            f"<strong>{total}</strong></div>"
+            f"<div class='bar'><span style='width:{pct}%'></span></div></div>"
         )
-    except DatabaseError as exc:
-        _collection_lock.release()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    def worker() -> None:
-        try:
-            outcome = execute_collection(
-                products,
-                settings,
-                providers=providers,
-                limit=limit,
-                delay=effective_delay,
-                database=None,  # a coleta ja foi aberta acima
-                origem=extra.get("origem", "api"),
-            )
-            db.save_rows(coleta_id, outcome.rows)
-            db.finish_run(coleta_id, status="CONCLUIDA", totals=outcome.totals)
-            with suppress(Exception):
-                export_results(
-                    outcome.rows, _artifacts_dir / f"coleta-{coleta_id}.xlsx"
-                )
-            logger.info("Coleta %s concluida", coleta_id)
-        except Exception as exc:
-            logger.exception("Coleta %s falhou", coleta_id)
-            with suppress(Exception):
-                db.finish_run(coleta_id, status="FALHOU", erro=str(exc))
-        finally:
-            _collection_lock.release()
-
-    threading.Thread(
-        target=worker, name=f"coleta-{coleta_id}", daemon=True
-    ).start()
-    return coleta_id
+    return "".join(partes)
 
 
-# ------------------------------------------------------------------ endpoints
+def _tabela_precos(linhas: list[dict[str, Any]]) -> str:
+    if not linhas:
+        return "<p class='sub'>Nenhuma oferta com preco coletada ainda.</p>"
+    corpo = []
+    for linha in linhas:
+        url = safe_url(linha.get("url_compra"))
+        titulo = esc(linha.get("titulo"))
+        # O link e o do proprio anuncio de onde o nome saiu.
+        anuncio = (
+            f"<a href='{esc(url)}' target='_blank' rel='noopener noreferrer nofollow'>"
+            f"{titulo}</a><span class='host'> · {esc(dominio(url))}</span>"
+            if url
+            else f"{titulo}<span class='host'> · sem link</span>"
+        )
+        corpo.append(
+            "<tr>"
+            f"<td><span class='prod'>{esc(linha.get('produto'))}</span>"
+            f"<span class='anuncio'>{anuncio}</span></td>"
+            f"<td>{esc(linha.get('marca'))}</td>"
+            f"<td>{esc(linha.get('quantidade_embalagem'))}</td>"
+            f"<td>{esc(linha.get('fonte'))}</td>"
+            f"<td class='num'>{moeda(linha.get('preco_min'), linha.get('moeda') or 'R$')}</td>"
+            "</tr>"
+        )
+    return (
+        "<div class='scroll'><table><thead><tr><th>Produto / anuncio</th>"
+        "<th>Marca</th><th>Embalagem</th><th>Fonte</th>"
+        "<th class='num'>Menor preco</th></tr></thead>"
+        f"<tbody>{''.join(corpo)}</tbody></table></div>"
+    )
 
 
-@app.get("/")
-def raiz() -> dict[str, Any]:
-    return {
-        "servico": "copercitrus-price-collector",
-        "versao": __version__,
-        # Estado real da conexao fica em /health; aqui so dizemos se ha DSN.
-        "banco": "configurado" if _state.get("database") else "nao configurado",
-        "schema": "pronto" if _state.get("schema_ready") else "pendente",
-        "docs": "/docs",
-        "health": "/health",
-    }
+def _tabela_dispersao(linhas: list[dict[str, Any]]) -> str:
+    if not linhas:
+        return "<p class='sub'>Sem produtos com mais de uma oferta.</p>"
+    corpo = "".join(
+        "<tr>"
+        f"<td>{esc(l.get('produto'))}</td>"
+        f"<td class='num'>{int(l.get('ofertas') or 0)}</td>"
+        f"<td class='num'>{moeda(l.get('menor'))}</td>"
+        f"<td class='num'>{moeda(l.get('maior'))}</td>"
+        f"<td class='num'><strong>{moeda(l.get('diferenca'))}</strong></td>"
+        "</tr>"
+        for l in linhas
+    )
+    return (
+        "<div class='scroll'><table><thead><tr><th>Produto</th>"
+        "<th class='num'>Ofertas</th><th class='num'>Menor</th>"
+        "<th class='num'>Maior</th><th class='num'>Economia</th></tr></thead>"
+        f"<tbody>{corpo}</tbody></table></div>"
+    )
+
+
+# -------------------------------------------------------------- endpoints
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard() -> HTMLResponse:
+    db = _state.get("database")
+    if db is None:
+        return HTMLResponse(
+            _pagina(
+                "Dashboard indisponivel",
+                "<div class='panel empty'><h1>Banco nao configurado</h1>"
+                "<p>Defina <code>DATABASE_URL</code> nas variaveis do servico "
+                "apontando para o PostgreSQL do projeto.</p></div>",
+            ),
+            status_code=503,
+        )
+    try:
+        ensure_schema(db)
+        resumo = db.resumo()
+        fontes = db.ofertas_por_fonte()
+        classes = db.distribuicao_classificacao()
+        precos = db.melhor_preco_por_produto(limit=200)
+        dispersao = db.maiores_dispersoes(limit=10)
+        falhas = db.buscas_sem_oferta(limit=10)
+    except (DatabaseError, HTTPException) as exc:
+        detalhe = getattr(exc, "detail", str(exc))
+        return HTMLResponse(
+            _pagina(
+                "Dashboard indisponivel",
+                "<div class='panel empty'><h1>Sem conexao com o banco</h1>"
+                f"<p>{esc(detalhe)}</p></div>",
+            ),
+            status_code=503,
+        )
+
+    if not int(resumo.get("ofertas") or 0):
+        corpo = (
+            "<header><div><h1>CoperCitrus — Dashboard de precos</h1>"
+            "<div class='sub'>Somente leitura · dados do PostgreSQL</div></div></header>"
+            "<div class='panel empty'><h2>Banco vazio</h2>"
+            "<p>Nenhuma coleta registrada ainda. Rode o RPA para alimentar o banco:</p>"
+            "<p><code>copercitrus-price collect produtos.xlsx</code></p>"
+            "<p class='sub'>Com <code>DATABASE_URL</code> apontando para este "
+            "mesmo PostgreSQL.</p></div>"
+        )
+        return HTMLResponse(_pagina("CoperCitrus — Dashboard", corpo))
+
+    kpis = [
+        (f"{int(resumo.get('produtos') or 0)}", "Produtos"),
+        (f"{int(resumo.get('ofertas') or 0)}", "Ofertas"),
+        (f"{int(resumo.get('buscas') or 0)}", "Buscas"),
+        (f"{int(resumo.get('coletas') or 0)}", "Coletas"),
+        (moeda(resumo.get("preco_medio")), "Preco medio"),
+        (f"{int(resumo.get('erros') or 0)}", "Buscas com erro"),
+    ]
+    cards = "".join(
+        f"<div class='kpi'><div class='n'>{esc(n)}</div><div class='l'>{esc(l)}</div></div>"
+        for n, l in kpis
+    )
+
+    falhas_html = (
+        "".join(
+            f"<tr><td>{esc(f.get('produto'))}</td><td>{esc(f.get('fonte'))}</td>"
+            f"<td><span class='tag'>{esc(f.get('status'))}</span></td>"
+            f"<td class='sub'>{esc(f.get('erro'))}</td></tr>"
+            for f in falhas
+        )
+        or "<tr><td colspan='4' class='sub'>Nenhuma falha registrada.</td></tr>"
+    )
+
+    corpo = (
+        "<header><div><h1>CoperCitrus — Dashboard de precos</h1>"
+        "<div class='sub'>Somente leitura · dados do PostgreSQL · "
+        f"ultima coleta em {esc(data_hora(resumo.get('ultima_coleta')))}</div></div></header>"
+        f"<div class='kpis'>{cards}</div>"
+        "<div class='grid2'>"
+        f"<div class='panel'><h2>Ofertas por fonte</h2>{_barras(fontes, 'fonte', 'ofertas')}</div>"
+        "<div class='panel'><h2>Aderencia ao produto pedido</h2>"
+        f"{_barras(classes, 'classificacao', 'total')}</div>"
+        "</div>"
+        "<div class='panel'><h2>Maior economia potencial</h2>"
+        f"{_tabela_dispersao(dispersao)}</div>"
+        "<div class='panel'><h2>Menor preco por produto</h2>"
+        f"{_tabela_precos(precos)}</div>"
+        "<div class='panel'><h2>Buscas sem oferta</h2><div class='scroll'><table>"
+        "<thead><tr><th>Produto</th><th>Fonte</th><th>Status</th><th>Detalhe</th></tr></thead>"
+        f"<tbody>{falhas_html}</tbody></table></div></div>"
+        f"<footer>copercitrus-price-collector {esc(__version__)} · "
+        "coleta pelo CLI, visualizacao somente leitura</footer>"
+    )
+    return HTMLResponse(_pagina("CoperCitrus — Dashboard de precos", corpo))
 
 
 @app.get("/health")
@@ -272,111 +381,33 @@ def health() -> JSONResponse:
     return JSONResponse(content={"status": "ok", "banco": "ok"})
 
 
-@app.post(
-    "/buscas",
-    status_code=202,
-    response_model=ColetaAceita,
-    dependencies=[Depends(require_api_key)],
-)
-def criar_busca(payload: BuscaIn) -> ColetaAceita:
-    try:
-        providers = parse_providers(payload.providers)
-    except PriceCollectorError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    products = [
-        ProductInput(
-            row_number=index,
-            produto=item.produto.strip(),
-            marca=(item.marca or None),
-            modelo=(item.modelo or None),
-            sku=(item.sku or None),
-            quantidade_solicitada=(item.quantidade or None),
-        )
-        for index, item in enumerate(payload.produtos, start=1)
-    ]
-
-    coleta_id = _run_in_background(
-        products,
-        providers,
-        payload.limit,
-        payload.delay,
-        {"origem": "api"},
-    )
-    return ColetaAceita(
-        coleta_id=coleta_id,
-        status="EM_ANDAMENTO",
-        total_produtos=len(products),
-        detalhe=f"Acompanhe em GET /buscas/{coleta_id}",
-    )
+@app.get("/api/resumo")
+def api_resumo(db: Database = Depends(get_database)) -> dict[str, Any]:
+    return {
+        "resumo": db.resumo(),
+        "por_fonte": db.ofertas_por_fonte(),
+        "por_classificacao": db.distribuicao_classificacao(),
+    }
 
 
-@app.post(
-    "/buscas/planilha",
-    status_code=202,
-    response_model=ColetaAceita,
-    dependencies=[Depends(require_api_key)],
-)
-async def criar_busca_por_planilha(
-    arquivo: Annotated[UploadFile, File(description="Planilha .xlsx de entrada")],
-    providers: Annotated[str, Form()] = "google,shopee",
-    limit: Annotated[int, Form(ge=1, le=20)] = 5,
-) -> ColetaAceita:
-    if not (arquivo.filename or "").casefold().endswith(".xlsx"):
-        raise HTTPException(status_code=400, detail="Envie um arquivo .xlsx")
-
-    conteudo = await arquivo.read(MAX_UPLOAD_BYTES + 1)
-    if len(conteudo) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Planilha acima de {MAX_UPLOAD_BYTES // (1024 * 1024)} MB",
-        )
-
-    with tempfile.TemporaryDirectory() as tmp:
-        destino = Path(tmp) / "entrada.xlsx"
-        destino.write_bytes(conteudo)
-        try:
-            selected = parse_providers(providers)
-            products = read_products(destino, None, MAX_PRODUTOS)
-        except PriceCollectorError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    coleta_id = _run_in_background(
-        products,
-        selected,
-        limit,
-        None,
-        {"origem": "api", "arquivo": arquivo.filename},
-    )
-    return ColetaAceita(
-        coleta_id=coleta_id,
-        status="EM_ANDAMENTO",
-        total_produtos=len(products),
-        detalhe=f"Acompanhe em GET /buscas/{coleta_id}",
-    )
+@app.get("/api/precos")
+def api_precos(
+    limit: int = 200, db: Database = Depends(get_database)
+) -> dict[str, Any]:
+    return {"precos": db.melhor_preco_por_produto(limit=max(1, min(limit, 1000)))}
 
 
-@app.get("/buscas")
-def listar_buscas(
+@app.get("/api/coletas")
+def api_coletas(
     limit: int = 50, offset: int = 0, db: Database = Depends(get_database)
 ) -> dict[str, Any]:
-    limit = max(1, min(limit, 200))
-    offset = max(0, offset)
-    return {"coletas": db.list_runs(limit=limit, offset=offset)}
+    return {
+        "coletas": db.list_runs(limit=max(1, min(limit, 200)), offset=max(0, offset))
+    }
 
 
-@app.get("/buscas/{coleta_id}")
-def detalhar_busca(
-    coleta_id: int, db: Database = Depends(get_database)
-) -> dict[str, Any]:
-    run = db.get_run(coleta_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="Coleta nao encontrada")
-    return run
-
-
-@app.get("/buscas/{coleta_id}/resultados")
-def resultados_da_busca(
+@app.get("/api/coletas/{coleta_id}/resultados")
+def api_resultados(
     coleta_id: int,
     limit: int = 500,
     offset: int = 0,
@@ -384,27 +415,9 @@ def resultados_da_busca(
 ) -> dict[str, Any]:
     if db.get_run(coleta_id) is None:
         raise HTTPException(status_code=404, detail="Coleta nao encontrada")
-    limit = max(1, min(limit, 2000))
-    offset = max(0, offset)
     return {
         "coleta_id": coleta_id,
-        "resultados": db.list_results(coleta_id, limit=limit, offset=offset),
-    }
-
-
-@app.get("/buscas/{coleta_id}/planilha")
-def planilha_da_busca(coleta_id: int) -> FileResponse:
-    caminho = _artifacts_dir / f"coleta-{coleta_id}.xlsx"
-    if not caminho.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="Excel indisponivel. O arquivo e temporario e some a cada deploy; "
-            "use GET /buscas/{id}/resultados para os dados persistidos.",
-        )
-    return FileResponse(
-        caminho,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "resultados": db.list_results(
+            coleta_id, limit=max(1, min(limit, 2000)), offset=max(0, offset)
         ),
-        filename=f"copercitrus-coleta-{coleta_id}.xlsx",
-    )
+    }

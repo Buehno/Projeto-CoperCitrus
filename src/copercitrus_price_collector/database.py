@@ -418,6 +418,114 @@ class Database:
                 return list(cur.fetchall())
 
 
+    # ------------------------------------------------------------- dashboard
+
+    def _rows(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return list(cur.fetchall())
+
+    def resumo(self) -> dict[str, Any]:
+        rows = self._rows(
+            """
+            SELECT (SELECT count(*) FROM coletas)                        AS coletas,
+                   (SELECT count(*) FROM buscas)                         AS buscas,
+                   (SELECT count(*) FROM resultados)                     AS ofertas,
+                   (SELECT count(DISTINCT produto) FROM buscas)          AS produtos,
+                   (SELECT count(*) FROM buscas WHERE status = 'ERRO')   AS erros,
+                   (SELECT max(iniciada_em) FROM coletas)                AS ultima_coleta,
+                   (SELECT avg(preco_min) FROM resultados
+                     WHERE preco_min IS NOT NULL)                        AS preco_medio
+            """
+        )
+        return rows[0] if rows else {}
+
+    def ofertas_por_fonte(self) -> list[dict[str, Any]]:
+        return self._rows(
+            """
+            SELECT b.fonte,
+                   count(r.id)     AS ofertas,
+                   avg(r.preco_min) AS preco_medio,
+                   min(r.preco_min) AS menor_preco
+              FROM buscas b
+              LEFT JOIN resultados r ON r.busca_id = b.id
+             GROUP BY b.fonte
+             ORDER BY ofertas DESC
+            """
+        )
+
+    def distribuicao_classificacao(self) -> list[dict[str, Any]]:
+        return self._rows(
+            """
+            SELECT coalesce(classificacao, 'SEM_CLASSIFICACAO') AS classificacao,
+                   count(*) AS total
+              FROM resultados
+             GROUP BY 1
+             ORDER BY total DESC
+            """
+        )
+
+    def melhor_preco_por_produto(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Oferta mais barata de cada produto, com o link do proprio anuncio."""
+
+        return self._rows(
+            """
+            SELECT DISTINCT ON (b.produto)
+                   b.produto,
+                   b.fonte,
+                   r.titulo,
+                   r.marca,
+                   r.quantidade_embalagem,
+                   r.preco_min,
+                   r.moeda,
+                   r.url_compra,
+                   r.vendedor,
+                   r.similaridade,
+                   r.classificacao
+              FROM buscas b
+              JOIN resultados r ON r.busca_id = b.id
+             WHERE r.preco_min IS NOT NULL
+             ORDER BY b.produto, r.preco_min ASC
+             LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def maiores_dispersoes(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Produtos com maior diferenca entre a oferta mais cara e a mais barata."""
+
+        return self._rows(
+            """
+            SELECT b.produto,
+                   count(r.id)                            AS ofertas,
+                   min(r.preco_min)                       AS menor,
+                   max(r.preco_min)                       AS maior,
+                   max(r.preco_min) - min(r.preco_min)    AS diferenca
+              FROM buscas b
+              JOIN resultados r ON r.busca_id = b.id
+             WHERE r.preco_min IS NOT NULL
+             GROUP BY b.produto
+            HAVING count(r.id) > 1 AND max(r.preco_min) > min(r.preco_min)
+             ORDER BY diferenca DESC
+             LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def buscas_sem_oferta(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self._rows(
+            """
+            SELECT produto, fonte, status, erro, coletado_em
+              FROM buscas
+             WHERE status <> 'OK'
+             ORDER BY coletado_em DESC
+             LIMIT %s
+            """,
+            (limit,),
+        )
+
+
 def _group_status(group: Sequence[CollectionRow]) -> str:
     statuses = {row.status for row in group}
     if "OK" in statuses:

@@ -37,7 +37,15 @@ GOOGLE_SELECTORS = SiteSelectors(
         "span[aria-label*='R$']",
         "div[data-price]",
     ),
-    links=("a[href]", "a[href*='/shopping/product/']", "a[href*='/products/']"),
+    # Do mais especifico para o mais generico: `_first_attribute` para no
+    # primeiro que casar, entao `a[href]` no inicio anularia os demais e
+    # devolveria qualquer ancora do card (loja, badge, imagem) como link.
+    links=(
+        "a[href*='/shopping/product/']",
+        "a[href*='/products/']",
+        "a[href*='/url?']",
+        "a[href]",
+    ),
     descriptions=(".vEjMR", ".sh-np__product-title", ".hP4iBf", ".b5YqMe"),
     sellers=(".aULzUe", ".IuHnof", ".sh-np__seller-container", "div[aria-label*='loja']"),
 )
