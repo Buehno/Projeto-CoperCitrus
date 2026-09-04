@@ -1,0 +1,16 @@
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+tests/
+dist/
+build/
+resultados/
+*.xlsx
+*.xls
+*.csv
+.env
+.DS_Store

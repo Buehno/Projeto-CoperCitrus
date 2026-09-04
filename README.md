@@ -111,20 +111,130 @@ O projeto nao tenta:
 - acessar paginas autenticadas;
 - extrair dados que nao estejam visiveis ao usuario.
 
+## Banco de dados (PostgreSQL)
+
+Alem do Excel, cada execucao pode ser registrada em PostgreSQL. A gravacao e
+ativada apenas pela presenca da variavel `DATABASE_URL`; sem ela o RPA funciona
+exatamente como antes.
+
+### Tabelas
+
+O schema e criado sozinho, de forma idempotente (`CREATE TABLE IF NOT EXISTS`),
+na subida da API ou no primeiro `collect`. Nao existe passo manual de migracao.
+
+| Tabela | Conteudo |
+|---|---|
+| `coletas` | Uma linha por execucao: origem (`cli`/`api`), status, inicio/fim, totais e os parametros usados em `jsonb` |
+| `buscas` | Uma linha por produto x fonte pesquisada: dados da entrada, termo pesquisado, status (`OK`, `SEM_RESULTADO`, `ERRO`) e a mensagem de erro |
+| `resultados` | Uma linha por oferta encontrada: titulo, marca, quantidade/embalagem, preco, moeda, link, vendedor, similaridade e classificacao |
+
+`buscas` referencia `coletas` e `resultados` referencia `buscas`, ambos com
+`ON DELETE CASCADE`: apagar uma coleta remove todo o historico dela.
+
+### Comandos
+
+```bash
+copercitrus-price db check   # testa a conexao
+copercitrus-price db init    # cria as tabelas
+copercitrus-price db runs    # lista as ultimas coletas
+```
+
+A coleta grava no banco automaticamente quando `DATABASE_URL` esta definida:
+
+```bash
+export DATABASE_URL="postgresql://usuario:senha@host:5432/banco"
+copercitrus-price collect produtos.xlsx
+```
+
+Para gerar apenas o Excel, ignorando o banco:
+
+```bash
+copercitrus-price collect produtos.xlsx --no-db
+```
+
+O banco e um registro paralelo: se o PostgreSQL estiver fora, a coleta emite um
+aviso e o Excel continua sendo gerado normalmente.
+
+## API HTTP
+
+`copercitrus_price_collector.web:app` e o processo que fica no ar em producao.
+Documentacao interativa em `/docs`.
+
+| Metodo | Rota | Uso |
+|---|---|---|
+| `GET` | `/health` | Healthcheck; `200` com banco ok, `503` degradado |
+| `POST` | `/buscas` | Dispara uma coleta a partir de uma lista JSON de produtos |
+| `POST` | `/buscas/planilha` | Dispara uma coleta enviando um `.xlsx` (multipart) |
+| `GET` | `/buscas` | Historico de coletas |
+| `GET` | `/buscas/{id}` | Status e totais de uma coleta |
+| `GET` | `/buscas/{id}/resultados` | Ofertas gravadas no banco |
+| `GET` | `/buscas/{id}/planilha` | Excel da coleta, enquanto o container viver |
+
+Uma coleta leva minutos, entao os dois `POST` respondem `202` na hora com o
+`coleta_id` e a execucao segue em segundo plano; acompanhe por
+`GET /buscas/{id}` ate o status virar `CONCLUIDA` ou `FALHOU`. So roda uma
+coleta por vez — uma segunda chamada simultanea recebe `409`.
+
+```bash
+curl -X POST http://localhost:8000/buscas \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"produtos":[{"produto":"Oleo lubrificante","marca":"Ipiranga"}],"limit":5}'
+```
+
+Se a variavel `API_KEY` estiver definida, os dois `POST` passam a exigir o
+header `X-API-Key`. As rotas de leitura permanecem abertas. **Defina `API_KEY`
+em producao**: sem ela qualquer pessoa com a URL dispara coletas no seu servico.
+
+Localmente:
+
+```bash
+uvicorn copercitrus_price_collector.web:app --reload
+```
+
+## Deploy no Railway
+
+1. Crie o servico apontando para este repositorio. O `railway.json` ja seleciona
+   o `Dockerfile`, define o healthcheck em `/health` e o start command.
+2. No projeto, adicione um banco **PostgreSQL**. O Railway injeta `DATABASE_URL`
+   no servico automaticamente — nao e preciso copiar nada.
+3. Em *Variables*, defina `API_KEY` com um valor secreto.
+4. Faca o commit. O deploy sobe, as tabelas sao criadas na primeira conexao e o
+   healthcheck responde `200`.
+
+Variaveis opcionais: `RESULT_LIMIT`, `REQUEST_DELAY_SECONDS`,
+`RPA_BROWSER_TIMEOUT_SECONDS`. `PORT` e `RPA_HEADLESS` ja vem prontos.
+
+O `/buscas/{id}/planilha` grava em disco efemero: o arquivo some a cada deploy
+ou restart. Os dados persistidos ficam no PostgreSQL.
+
 ## Docker
+
+A imagem sobe a API por padrao:
 
 ```bash
 docker build -t copercitrus-rpa .
+docker run --rm --ipc=host -p 8000:8000 \
+  -e DATABASE_URL="postgresql://usuario:senha@host:5432/banco" \
+  copercitrus-rpa
+```
+
+Para usar o CLI, basta sobrescrever o comando:
+
+```bash
 docker run --rm --ipc=host \
   -v "$PWD/dados:/dados" \
-  copercitrus-rpa collect /dados/produtos.xlsx --output /dados/resultados.xlsx
+  copercitrus-rpa \
+  copercitrus-price collect /dados/produtos.xlsx --output /dados/resultados.xlsx
 ```
 
 ## Testes
 
-Os testes usam cards simulados e nao acessam Google ou Shopee.
+Os testes usam cards simulados e um banco falso: nao acessam Google, Shopee nem
+PostgreSQL.
 
 ```bash
+python -m pip install -e ".[dev]"
 python -m unittest discover -s tests -v
 ```
 

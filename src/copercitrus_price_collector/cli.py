@@ -4,10 +4,9 @@ import argparse
 import sys
 from dataclasses import replace
 
-from .browser import BrowserRpa
+from .database import Database, DatabaseError, database_url
 from .errors import ConfigurationError, PriceCollectorError
-from .providers import GoogleShoppingProvider, PriceProvider, ShopeeProvider
-from .service import CollectionService
+from .runner import execute_collection
 from .settings import Settings
 from .spreadsheet import create_template, export_results, read_products
 
@@ -48,21 +47,128 @@ def _parser() -> argparse.ArgumentParser:
         "--browser-cdp-url",
         help="conecta a um Chrome ja aberto com depuracao remota, por exemplo http://127.0.0.1:9222",
     )
+    collect.add_argument(
+        "--no-db",
+        action="store_true",
+        help="nao registra a coleta no PostgreSQL mesmo com DATABASE_URL definida",
+    )
+
+    database = subcommands.add_parser(
+        "db", help="operacoes no PostgreSQL configurado em DATABASE_URL"
+    )
+    db_actions = database.add_subparsers(dest="db_command", required=True)
+    db_actions.add_parser("init", help="cria as tabelas da coleta se nao existirem")
+    db_actions.add_parser("check", help="testa a conexao com o banco")
+    history = db_actions.add_parser("runs", help="lista as ultimas coletas registradas")
+    history.add_argument("--limit", type=int, default=20)
+
     return parser
 
 
-def _build_providers(selected: list[str], browser: BrowserRpa) -> list[PriceProvider]:
-    providers: list[PriceProvider] = []
-    unknown = sorted(set(selected) - {"google", "shopee"})
-    if unknown:
-        raise ConfigurationError(f"Fonte desconhecida: {', '.join(unknown)}")
-    if "google" in selected:
-        providers.append(GoogleShoppingProvider(browser))
-    if "shopee" in selected:
-        providers.append(ShopeeProvider(browser))
-    if not providers:
-        raise ConfigurationError("Selecione ao menos uma fonte")
-    return providers
+def _open_database() -> Database:
+    dsn = database_url()
+    if not dsn:
+        raise ConfigurationError(
+            "DATABASE_URL nao configurada. No Railway, vincule um PostgreSQL ao servico."
+        )
+    db = Database(dsn)
+    db.open()
+    return db
+
+
+def _run_db_command(args: argparse.Namespace) -> int:
+    db = _open_database()
+    try:
+        if args.db_command == "init":
+            db.create_schema()
+            print("Schema criado/atualizado com sucesso.")
+            return 0
+        if args.db_command == "check":
+            db.ping()
+            print("Conexao com o PostgreSQL confirmada.")
+            return 0
+        if args.db_command == "runs":
+            runs = db.list_runs(limit=max(1, args.limit))
+            if not runs:
+                print("Nenhuma coleta registrada.")
+                return 0
+            for run in runs:
+                print(
+                    f"#{run['id']:<6} {run['iniciada_em']:%Y-%m-%d %H:%M}  "
+                    f"{run['origem']:<6} {run['status']:<13} "
+                    f"produtos={run['total_produtos']:<4} "
+                    f"ofertas={run['total_ofertas']:<5} "
+                    f"erros={run['total_erros']}"
+                )
+            return 0
+        raise ConfigurationError(f"Subcomando desconhecido: {args.db_command}")
+    finally:
+        db.close()
+
+
+def _run_collect(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    if args.headed:
+        settings = replace(settings, headless=False)
+    if args.browser_channel:
+        settings = replace(settings, browser_channel=args.browser_channel)
+    if args.browser_user_data_dir:
+        settings = replace(settings, browser_user_data_dir=args.browser_user_data_dir)
+    if args.browser_cdp_url:
+        settings = replace(settings, browser_cdp_url=args.browser_cdp_url)
+
+    limit = args.limit if args.limit is not None else settings.result_limit
+    delay = args.delay if args.delay is not None else settings.request_delay_seconds
+    if not 1 <= limit <= 20:
+        raise ConfigurationError("--limit deve estar entre 1 e 20")
+    if delay < 0:
+        raise ConfigurationError("--delay nao pode ser negativo")
+
+    products = read_products(args.input, args.sheet, args.max_products)
+
+    database: Database | None = None
+    dsn = None if args.no_db else database_url()
+    if dsn:
+        try:
+            database = Database(dsn)
+            database.open()
+            database.create_schema()
+        except DatabaseError as exc:
+            # O banco e um registro paralelo: sua indisponibilidade nao pode
+            # impedir a geracao do Excel, que e a entrega principal do RPA.
+            print(f"Aviso: coleta nao sera registrada no banco ({exc})", file=sys.stderr)
+            if database is not None:
+                database.close()
+            database = None
+
+    try:
+        outcome = execute_collection(
+            products,
+            settings,
+            providers=args.providers,
+            limit=limit,
+            delay=delay,
+            database=database,
+            origem="cli",
+            extra_parametros={"entrada": str(args.input)},
+        )
+    finally:
+        if database is not None:
+            database.close()
+
+    destination = export_results(outcome.rows, args.output)
+    totals = outcome.totals
+    registro = (
+        f" Coleta #{outcome.coleta_id} registrada no banco."
+        if outcome.coleta_id is not None
+        else ""
+    )
+    print(
+        f"Concluido: {totals.total_produtos} produtos, {totals.total_ofertas} ofertas, "
+        f"{totals.total_similares} similares e {totals.total_erros} erros. "
+        f"Arquivo: {destination}.{registro}"
+    )
+    return 0 if not totals.total_erros else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,51 +181,9 @@ def main(argv: list[str] | None = None) -> int:
             destination = create_template(args.output)
             print(f"Planilha-modelo criada: {destination}")
             return 0
-
-        settings = Settings.from_env()
-        if args.headed:
-            settings = replace(settings, headless=False)
-        if args.browser_channel:
-            settings = replace(settings, browser_channel=args.browser_channel)
-        if args.browser_user_data_dir:
-            settings = replace(
-                settings, browser_user_data_dir=args.browser_user_data_dir
-            )
-        if args.browser_cdp_url:
-            settings = replace(settings, browser_cdp_url=args.browser_cdp_url)
-
-        selected = [
-            item.strip().casefold() for item in args.providers.split(",") if item.strip()
-        ]
-        limit = args.limit if args.limit is not None else settings.result_limit
-        delay = (
-            args.delay
-            if args.delay is not None
-            else settings.request_delay_seconds
-        )
-        if not 1 <= limit <= 20:
-            raise ConfigurationError("--limit deve estar entre 1 e 20")
-        if delay < 0:
-            raise ConfigurationError("--delay nao pode ser negativo")
-
-        products = read_products(args.input, args.sheet, args.max_products)
-        with BrowserRpa(settings) as browser:
-            providers = _build_providers(selected, browser)
-            rows = CollectionService(providers, limit, delay).collect(products)
-
-        destination = export_results(rows, args.output)
-        offers = sum(1 for row in rows if row.status == "OK")
-        similars = sum(
-            1
-            for row in rows
-            if row.result is not None and row.result.possible_similar
-        )
-        errors = sum(1 for row in rows if row.status == "ERRO")
-        print(
-            f"Concluido: {len(products)} produtos, {offers} ofertas, "
-            f"{similars} similares e {errors} erros. Arquivo: {destination}"
-        )
-        return 0 if not errors else 1
+        if args.command == "db":
+            return _run_db_command(args)
+        return _run_collect(args)
     except KeyboardInterrupt:
         print("Coleta interrompida pelo usuario.", file=sys.stderr)
         return 130
