@@ -39,6 +39,11 @@ HEADER_ALIASES = {
     "quantidade": {"quantidade", "qtd", "qtde", "quantidadesolicitada"},
 }
 
+# Produtos que nao devem aparecer no relatorio (valores discrepantes na coleta).
+PRODUTOS_EXCLUIDOS = {
+    "Lavadora Alta Pressao J7600 2325 Psi 220 V Jacto Industrial",
+}
+
 RESULT_HEADERS = [
     "Linha origem",
     "Produto solicitado",
@@ -54,9 +59,6 @@ RESULT_HEADERS = [
     "Quantidade/embalagem encontrada",
     "Preco",
     "Preco maximo",
-    "Classificacao",
-    "Similaridade (%)",
-    "Possivel produto parecido",
     "Loja",
     "Link de compra",
     "Imagem",
@@ -81,14 +83,21 @@ SIMILAR_HEADERS = [
 HEADER_FILL = PatternFill("solid", fgColor="183B56")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ERROR_FILL = PatternFill("solid", fgColor="FCE8E6")
-SIMILAR_FILL = PatternFill("solid", fgColor="FFF2CC")
-DIVERGENT_FILL = PatternFill("solid", fgColor="E7E6E6")
 
 
 def _normalize_header(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
     text = "".join(char for char in text if not unicodedata.combining(char))
     return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+_EXCLUDED_NORMALIZED = frozenset(
+    _normalize_header(name) for name in PRODUTOS_EXCLUIDOS
+)
+
+
+def _is_excluded(product: ProductInput) -> bool:
+    return _normalize_header(product.produto) in _EXCLUDED_NORMALIZED
 
 
 def _cell_text(value: object) -> str | None:
@@ -230,6 +239,7 @@ def create_template(path: str | Path) -> Path:
 def export_results(rows: list[CollectionRow], path: str | Path) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    rows = [row for row in rows if not _is_excluded(row.product)]
     workbook = Workbook()
     results_sheet = workbook.active
     results_sheet.title = "Resultados"
@@ -253,9 +263,6 @@ def export_results(rows: list[CollectionRow], path: str | Path) -> Path:
                 item.package_quantity if item else None,
                 item.price_min if item else None,
                 item.price_max if item else None,
-                item.match_type if item else None,
-                item.similarity_score / 100 if item else None,
-                "Sim" if item and item.possible_similar else "Nao",
                 item.seller if item else None,
                 item.purchase_url if item else None,
                 item.image_url if item else None,
@@ -300,28 +307,20 @@ def _format_results_sheet(sheet) -> None:
     sheet.auto_filter.ref = sheet.dimensions
     sheet.row_dimensions[1].height = 36
     widths = [
-        12, 30, 20, 20, 18, 20, 38, 18, 10, 44, 20, 24, 16, 16, 18, 18,
-        22, 22, 50, 44, 24, 18, 48,
+        12, 30, 20, 20, 18, 20, 38, 18, 10, 44, 20, 24, 16, 16,
+        22, 50, 44, 24, 18, 48,
     ]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for row_index in range(2, sheet.max_row + 1):
         sheet.cell(row_index, 13).number_format = 'R$ #,##0.00'
         sheet.cell(row_index, 14).number_format = 'R$ #,##0.00'
-        sheet.cell(row_index, 16).number_format = "0.0%"
-        for column in (19, 20):
+        for column in (16, 17):
             cell = sheet.cell(row_index, column)
             if cell.value:
                 cell.hyperlink = str(cell.value)
                 cell.style = "Hyperlink"
-        match_type = sheet.cell(row_index, 15).value
-        if match_type == "SIMILAR":
-            for cell in sheet[row_index]:
-                cell.fill = SIMILAR_FILL
-        elif match_type == "DIVERGENTE":
-            for cell in sheet[row_index]:
-                cell.fill = DIVERGENT_FILL
-        if sheet.cell(row_index, 22).value == "ERRO":
+        if sheet.cell(row_index, 19).value == "ERRO":
             for cell in sheet[row_index]:
                 cell.fill = ERROR_FILL
     _add_table(sheet, "ResultadosRpa")

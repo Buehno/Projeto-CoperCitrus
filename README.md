@@ -8,7 +8,7 @@ Nao utiliza SerpAPI, API de Afiliados da Shopee nem qualquer outra API de result
 
 O Excel de saida possui tres abas:
 
-- `Resultados`: todos os anuncios encontrados, com preco, marca, nome, quantidade/embalagem, loja, link e classificacao;
+- `Resultados`: todos os anuncios encontrados, com preco, marca, nome, quantidade/embalagem, loja e link;
 - `Produtos similares`: alternativas com similaridade intermediaria em relacao ao produto solicitado;
 - `Resumo`: total de ofertas, produtos compativeis, similares e menor preco por item.
 
@@ -22,7 +22,6 @@ O Excel de saida possui tres abas:
 | Marca encontrada | Validada no titulo do anuncio |
 | Quantidade/embalagem | Extraida de textos como `10 un`, `500 ml` ou `2 kg` |
 | Preco | Card visivel no marketplace |
-| Similaridade | Comparacao entre produto, marca, modelo e anuncio |
 | Link de compra | Link presente no card |
 
 `Quantidade solicitada` representa quanto a CoperCitrus pretende comprar. `Quantidade/embalagem encontrada` representa o volume identificado no anuncio. O RPA nao inventa estoque quando o site nao exibe essa informacao.
@@ -94,6 +93,12 @@ copercitrus-price collect produtos.xlsx --headed --browser-channel msedge
 - `DIVERGENTE`: similaridade abaixo de 50%.
 
 A marca e o modelo informado na entrada aumentam a precisao. A aba `Produtos similares` contem somente os resultados classificados como `SIMILAR`.
+
+A classificacao e a similaridade continuam sendo calculadas, mas nao aparecem na aba `Resultados`: as colunas `Classificacao`, `Similaridade (%)` e `Possivel produto parecido` foram removidas dessa aba, junto com o realce de cor de `SIMILAR` e `DIVERGENTE`.
+
+## Produtos excluidos do relatorio
+
+`PRODUTOS_EXCLUIDOS`, em `src/copercitrus_price_collector/spreadsheet.py`, lista produtos que nao devem sair no Excel por apresentarem valor discrepante na coleta. A comparacao ignora acentos, maiusculas e pontuacao. Para excluir outro item, acrescente o nome do produto ao conjunto.
 
 ## Bloqueios e mudancas de pagina
 

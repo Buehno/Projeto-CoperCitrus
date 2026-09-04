@@ -71,8 +71,11 @@ class SpreadsheetTest(unittest.TestCase):
             self.assertEqual(
                 ["Resultados", "Produtos similares", "Resumo"], workbook.sheetnames
             )
-            self.assertEqual("OK", workbook["Resultados"]["V2"].value)
-            self.assertEqual("Sim", workbook["Resultados"]["Q2"].value)
+            self.assertEqual("OK", workbook["Resultados"]["S2"].value)
+            self.assertNotIn(
+                "Similaridade (%)",
+                [cell.value for cell in workbook["Resultados"][1]],
+            )
             self.assertEqual("Mouse Logitech M185 kit 2 unidades", workbook["Produtos similares"]["D2"].value)
             self.assertEqual(79.9, workbook["Resumo"]["H2"].value)
             self.assertEqual(
@@ -82,6 +85,39 @@ class SpreadsheetTest(unittest.TestCase):
             self.assertEqual("Maior preco", workbook["Resumo"]["K1"].value)
             self.assertEqual("Fonte maior preco", workbook["Resumo"]["L1"].value)
             self.assertEqual("Link de compra mais caro", workbook["Resumo"]["M1"].value)
+            workbook.close()
+
+    def test_skips_products_listed_as_excluded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            excluded = ProductInput(
+                2, "LAVADORA ALTA PRESSÃO J7600 2325 PSI 220V JACTO INDUSTRIAL"
+            )
+            kept = ProductInput(3, "Mouse")
+            result = SearchResult(
+                provider="Shopee",
+                rank=1,
+                title="Anuncio",
+                description="",
+                price_min=10.0,
+                price_max=10.0,
+                currency="BRL",
+                purchase_url="https://shopee.example/item",
+            )
+            output = export_results(
+                [
+                    CollectionRow.success(excluded, result),
+                    CollectionRow.success(kept, result),
+                ],
+                Path(directory) / "resultado.xlsx",
+            )
+            workbook = load_workbook(output)
+            produtos = [
+                row[1]
+                for row in workbook["Resultados"].iter_rows(
+                    min_row=2, values_only=True
+                )
+            ]
+            self.assertEqual(["Mouse"], produtos)
             workbook.close()
 
 
